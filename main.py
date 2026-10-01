@@ -772,6 +772,56 @@ def perform_match_action(sct, hwnd, action):
             if not focus_scrcpy(hwnd):
                 continue
 
+            # Re-read the client rectangle AFTER focusing. Windows DPI/scaling
+            # and scrcpy window activation can otherwise make the first mapping
+            # stale by a few pixels or more.
+            if hwnd and user32 and user32.IsWindow(hwnd):
+                try:
+                    rect = wintypes.RECT()
+                    user32.GetClientRect(
+                        hwnd,
+                        ctypes.byref(rect)
+                    )
+
+                    client_origin = wintypes.POINT(
+                        rect.left,
+                        rect.top
+                    )
+
+                    user32.ClientToScreen(
+                        hwnd,
+                        ctypes.byref(client_origin)
+                    )
+
+                    client_x = int(client_origin.x)
+                    client_y = int(client_origin.y)
+                    client_w = int(
+                        rect.right - rect.left
+                    )
+                    client_h = int(
+                        rect.bottom - rect.top
+                    )
+
+                    screen_x = int(
+                        client_x
+                        + (px / max(1, frame_w))
+                        * client_w
+                    )
+                    screen_y = int(
+                        client_y
+                        + (py / max(1, frame_h))
+                        * client_h
+                    )
+
+                    print(
+                        "[MATCH] Click mapping refreshed | "
+                        f"client=({client_x},{client_y},"
+                        f"{client_w},{client_h}) "
+                        f"screen=({screen_x},{screen_y})"
+                    )
+                except Exception:
+                    pass
+
             left_click_screen(screen_x, screen_y)
 
             time.sleep(
@@ -1591,7 +1641,7 @@ def detect_new_game_state(
         reverse=True,
         key=lambda item: (
             item[0],
-            -item[1]
+            item[1]
         )
     )
 
@@ -1764,12 +1814,54 @@ def detect_new_game_state(
         )
         return None
 
-    second_reason = (
-        f"confirm exact={confirm_exact}/64 "
-        f"pieces={confirm_piece_count}/32"
+    # Re-check for White's first move after confirmation. This handles the
+    # race where the fresh board is detected at START, but White has already
+    # moved before the state machine reaches its turn-processing block.
+    candidate_board, detected_first_move = (
+        refresh_white_first_move_after_new_game(
+            sct,
+            hwnd,
+            candidate_board,
+            stockfish_color_now,
+            human_color_now,
+            board_coords,
+            perspective,
+            first_move
+        )
     )
 
-    return {
+    if detected_first_move is not None:
+        first_move = detected_first_move
+        kind = 1
+        second_reason = (
+            f"confirm exact={confirm_exact}/64 "
+            f"pieces={confirm_piece_count}/32 "
+            "| WHITE first move present"
+        )
+    else:
+        second_reason = (
+            f"confirm exact={confirm_exact}/64 "
+            f"pieces={confirm_piece_count}/32"
+        )
+
+    turn_ok, turn_reason = validate_new_game_turn_state(
+        candidate_board,
+        stockfish_color_now,
+        human_color_now,
+        first_move
+    )
+
+    if not turn_ok:
+        progress(
+            "MATCH",
+            f"new-game post-probe rejected | {turn_reason}",
+            key="new_match_post_probe_turn_reject",
+            interval=0.50,
+            force=True
+        )
+        return None
+
+        return {
         "frame": confirm_frame,
         "grid": confirm_grid,
         "scan_ms": scan_ms,
@@ -7080,6 +7172,92 @@ def detect_bottom_stockfish_color(
         if black_perspective
         else chess.WHITE
     )
+
+
+def refresh_white_first_move_after_new_game(
+    sct,
+    hwnd,
+    board,
+    stockfish_color_now,
+    human_color_now,
+    board_coords,
+    perspective,
+    first_move=None
+):
+    """
+    After the fresh board is accepted, give White one immediate verification
+    pass before deciding to wait.
+
+    This is important when Human=WHITE: a real e2e4/d2d4/... may already have
+    happened between the first detection frame and the state transition. Do
+    not leave the bot waiting on a stale START position.
+    """
+    if (
+        human_color_now != chess.WHITE
+        or first_move is not None
+        or board is None
+        or board.move_stack
+        or board.turn != chess.WHITE
+    ):
+        return board, first_move
+
+    probe_frame = capture_screen(
+        sct,
+        hwnd
+    )
+
+    if probe_frame is None:
+        return board, first_move
+
+    detected_first = detect_existing_white_first_move(
+        probe_frame,
+        board,
+        board_coords,
+        perspective
+    )
+
+    if detected_first is None:
+        return board, first_move
+
+    expected_board = expected_board_after_move(
+        board,
+        detected_first
+    )
+
+    try:
+        ok, reason = full_board_state_confirmed(
+            probe_frame,
+            expected_board,
+            board_coords,
+            perspective
+        )
+    except Exception:
+        ok = False
+        reason = "first-move full-board verification failed"
+
+    if not ok:
+        print(
+            "[MATCH] WHITE FIRST-MOVE PROBE REJECTED | "
+            f"{detected_first.uci()} | {reason}"
+        )
+        return board, first_move
+
+    try:
+        san = board.san(
+            detected_first
+        )
+    except Exception:
+        san = detected_first.uci()
+
+    board = expected_board
+
+    print(
+        "[MATCH] WHITE MOVE ALREADY PRESENT | "
+        f"{detected_first.uci()} {san} | "
+        "fresh-game first-move probe confirmed"
+    )
+
+    return board, detected_first
 
 
 def validate_new_game_turn_state(
