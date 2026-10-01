@@ -1665,6 +1665,28 @@ def detect_new_game_state(
         else chess.WHITE
     )
 
+    turn_ok, turn_reason = validate_new_game_turn_state(
+        candidate_board,
+        stockfish_color_now,
+        human_color_now,
+        first_move
+    )
+
+    if not turn_ok:
+        progress(
+            "MATCH",
+            f"new-game candidate rejected | {turn_reason}",
+            key="new_match_turn_reject",
+            interval=0.50,
+            force=True
+        )
+        return None
+
+    print(
+        "[MATCH] NEW GAME TURN CHECK | "
+        f"{turn_reason}"
+    )
+
     first_reason = (
         f"new-game candidate exact={exact}/64 "
         f"pieces={detected_piece_count}/32"
@@ -7060,6 +7082,96 @@ def detect_bottom_stockfish_color(
     )
 
 
+def validate_new_game_turn_state(
+    board,
+    stockfish_color_now,
+    human_color_now,
+    first_move=None
+):
+    """
+    Explicitly validate who must move first after every fresh-game reset.
+
+    Chess always starts with White. Therefore:
+      - Human = WHITE  -> Human must move first (unless White's first move
+                         is already visible, in which case Stockfish moves next).
+      - Human = BLACK  -> Stockfish/White must move first.
+    """
+    if board is None:
+        return False, "board is None"
+
+    if stockfish_color_now not in (chess.WHITE, chess.BLACK):
+        return False, "invalid Stockfish color"
+
+    if human_color_now not in (chess.WHITE, chess.BLACK):
+        return False, "invalid Human color"
+
+    if stockfish_color_now == human_color_now:
+        return False, "Stockfish/Human colors are identical"
+
+    # The legal first move in chess is always White's move. The returned
+    # candidate board may already contain that move.
+    expected_turn = (
+        chess.BLACK
+        if first_move is not None
+        else chess.WHITE
+    )
+
+    if board.turn != expected_turn:
+        return (
+            False,
+            (
+                "new-game turn mismatch | "
+                f"board_turn={'WHITE' if board.turn == chess.WHITE else 'BLACK'} "
+                f"expected={'WHITE' if expected_turn == chess.WHITE else 'BLACK'}"
+            )
+        )
+
+    first_player = (
+        "STOCKFISH"
+        if board.turn == stockfish_color_now
+        else "HUMAN"
+        if board.turn == human_color_now
+        else "INVALID"
+    )
+
+    if first_player == "INVALID":
+        return False, "board turn belongs to neither player"
+
+    # Before White has moved, the owner of White determines the first actor.
+    if first_move is None:
+        expected_first_player = (
+            "HUMAN"
+            if human_color_now == chess.WHITE
+            else "STOCKFISH"
+        )
+
+        if first_player != expected_first_player:
+            return (
+                False,
+                (
+                    "first-player mismatch | "
+                    f"Human={'WHITE' if human_color_now == chess.WHITE else 'BLACK'} "
+                    f"Stockfish={'WHITE' if stockfish_color_now == chess.WHITE else 'BLACK'} "
+                    f"expected_first={expected_first_player} "
+                    f"actual_first={first_player}"
+                )
+            )
+
+    # After White's first move is already on screen, the turn MUST be Black.
+    # Ownership of Black decides who acts next.
+    next_player = first_player
+
+    return (
+        True,
+        (
+            f"first={'WHITE' if human_color_now == chess.WHITE else 'STOCKFISH/WHITE'} "
+            f"| next={next_player} "
+            f"| Human={'WHITE' if human_color_now == chess.WHITE else 'BLACK'} "
+            f"| Stockfish={'WHITE' if stockfish_color_now == chess.WHITE else 'BLACK'}"
+        )
+    )
+
+
 def score_to_cp(score):
     if score.is_mate():
         mate = score.mate()
@@ -9744,6 +9856,12 @@ def main():
                                 print(
                                     "[INFO] Game READY."
                                 )
+
+                                print(
+                                    "[MATCH] FIRST-TURN DECISION | "
+                                    f"{'HUMAN' if board.turn == human_color else 'STOCKFISH'} "
+                                    "TO MOVE"
+                                )
                             else:
                                 print(
                                     "[INFO] Waiting for NEW MATCH..."
@@ -10081,6 +10199,12 @@ def main():
                                 f"{'WHITE' if stockfish_color == chess.WHITE else 'BLACK'} "
                                 f"| Human="
                                 f"{'WHITE' if human_color == chess.WHITE else 'BLACK'}"
+                            )
+
+                            print(
+                                "[MATCH] FIRST-TURN DECISION | "
+                                f"{'HUMAN' if board.turn == human_color else 'STOCKFISH'} "
+                                "TO MOVE"
                             )
 
                             if new_game.get("first_move") is not None:
@@ -11633,6 +11757,12 @@ def main():
                                 f"{'WHITE' if stockfish_color == chess.WHITE else 'BLACK'} "
                                 f"| Human="
                                 f"{'WHITE' if human_color == chess.WHITE else 'BLACK'}"
+                            )
+
+                            print(
+                                "[MATCH] FIRST-TURN DECISION | "
+                                f"{'HUMAN' if board.turn == human_color else 'STOCKFISH'} "
+                                "TO MOVE"
                             )
 
                             if fresh_game.get("first_move") is not None:
