@@ -262,7 +262,10 @@ def match_button_candidates(frame):
         np.ones((3, 13), np.uint8)
     )
 
-    roi_top = int(height * 0.45)
+    # Result controls sit in the middle/lower portion of the phone screen.
+    # The right button label is time-control dependent ("New 1+1",
+    # "New 3 min", "New 10+1", "New 5 min", ...), so do not use OCR/text.
+    roi_top = int(height * 0.24)
 
     contours, _ = cv2.findContours(
         edges[roi_top:, :],
@@ -276,18 +279,27 @@ def match_button_candidates(frame):
         bx, by, bw, bh = cv2.boundingRect(contour)
         by += roi_top
 
-        if bw < max(55, int(width * 0.10)):
+        if bw < max(120, int(width * 0.28)):
             continue
         if bh < max(18, int(height * 0.025)):
             continue
         if bw > int(width * 0.55) or bh > int(height * 0.16):
             continue
 
+        # Keep the actual Rematch / New-* row. This excludes the player
+        # cards above and the Game Review button far below it.
+        center_y = by + bh * 0.5
+        if (
+            center_y < height * 0.30
+            or center_y > height * 0.50
+        ):
+            continue
+
         aspect = bw / max(1.0, float(bh))
 
-        if aspect < 1.5 or aspect > 8.0:
+        if aspect < 2.0 or aspect > 8.0:
             continue
-        if bw * bh < 800:
+        if bw * bh < 4000:
             continue
 
         found.append(
@@ -1285,6 +1297,11 @@ MATE_SLOWER_LINE_CHANCE = 0.35
 HUMAN_SELECTION_EXTRA_DROP_CP = 70
 HUMAN_SELECTION_DISTANCE_CP = 80.0
 HUMAN_SELECTION_NON_BEST_CHANCE = 0.88
+
+# In normal human-like selection, do not let #1/#2 dominate when #3+
+# alternatives are safely available. Forced mate / forced-best / explicit
+# punishment paths remain unchanged.
+HUMAN_SELECTION_TOP12_MAX_CHANCE = 0.18
 
 # In the mating phase, first take genuinely free material when it is safe.
 # Once the opponent has only one non-king piece left, stop cleanup and mate.
@@ -7826,9 +7843,24 @@ def choose_stockfish_move(
                 14: 0.92,
             }
 
+        lower_rank_pool = [
+            candidate
+            for candidate in pool
+            if candidate["rank"] >= 2
+        ]
+
+        selection_pool = (
+            lower_rank_pool
+            if (
+                lower_rank_pool
+                and random.random() > HUMAN_SELECTION_TOP12_MAX_CHANCE
+            )
+            else pool
+        )
+
         weighted = []
 
-        for candidate in pool:
+        for candidate in selection_pool:
             distance = abs(
                 candidate["cp"]
                 - desired_cp
@@ -7952,9 +7984,24 @@ def choose_stockfish_move(
         14: 0.92,
     }
 
+    lower_rank_safe = [
+        candidate
+        for candidate in safe
+        if candidate["rank"] >= 2
+    ]
+
+    selection_safe = (
+        lower_rank_safe
+        if (
+            lower_rank_safe
+            and random.random() > HUMAN_SELECTION_TOP12_MAX_CHANCE
+        )
+        else safe
+    )
+
     weighted = []
 
-    for candidate in safe:
+    for candidate in selection_safe:
         weighted.append(
             (
                 candidate,
@@ -10663,11 +10710,22 @@ def main():
                                 "[MATCH] Result screen detected | "
                                 f"screen_change={screen_change:.3f}"
                             )
-                            print(
-                                f"[MATCH] Waiting "
-                                f"{max(0.0, match_auto_after - time.perf_counter()):.3f}s "
-                                "before automatic match action"
+                            remaining_delay = max(
+                                0.0,
+                                match_auto_after - time.perf_counter()
                             )
+
+                            if remaining_delay > 0.001:
+                                print(
+                                    f"[MATCH] Waiting "
+                                    f"{remaining_delay:.3f}s "
+                                    "before automatic match action"
+                                )
+                            else:
+                                print(
+                                    "[MATCH] Automatic match action READY | "
+                                    "no artificial delay"
+                                )
 
                 if match_ui.get("phase") == "RESULT":
                     requested_action = match_ui.get("requested_action")
