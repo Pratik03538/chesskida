@@ -110,6 +110,7 @@ BOT_CONFIRM_GAP = 0.0
 # transient anti-aliased edge after a tap.
 BOT_POST_MATCH_THRESHOLD = 0.48
 HUMAN_POST_MATCH_THRESHOLD = 0.55
+FAST_ABSENCE_MATCH_THRESHOLD = 0.28
 # Full-board verification first trusts the expected python-chess piece
 # on occupied squares, then falls back to the normal scan result.
 # This prevents a single rook/bishop template confusion (for example
@@ -4444,7 +4445,7 @@ def direct_move_state_confirmed(
                 else chess.D8
             )
 
-        ok, reason = require_empty(
+        ok, reason = require_piece_absent(
             rook_from,
             "castling rook source"
         )
@@ -4474,7 +4475,7 @@ def direct_move_state_confirmed(
             else move.to_square + 8
         )
 
-        ok, reason = require_empty(
+        ok, reason = require_piece_absent(
             captured_square,
             "en-passant captured square"
         )
@@ -4650,7 +4651,7 @@ def _fast_expected_post_state_from_map(
         board_coords[3] / 8.0
     )
 
-    def require_empty(square, label):
+    def require_piece_absent(square, label):
         crop = _fast_square_crop(
             after_frame,
             board_coords,
@@ -4660,31 +4661,29 @@ def _fast_expected_post_state_from_map(
         if crop is None:
             return False, f"{label} crop unavailable"
 
-        # Cheap occupancy gate first; only run the 12-template classifier when
-        # the square is visually non-empty.
-        small = cv2.resize(
-            crop,
-            (16, 16),
-            interpolation=cv2.INTER_AREA
-        )
-        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-        core = gray[3:13, 3:13]
-        if float(np.std(core)) < EMPTY_STD_THRESHOLD:
-            return True, f"{label}=empty"
+        # Check ONLY the piece that occupied this square before the move.
+        # The old generic classifier could misread an actually-empty source
+        # as another piece (e.g. pawn/empty -> N), causing seconds of retries.
+        previous_piece = board.piece_at(square)
+        if previous_piece is None:
+            return True, f"{label}=already empty"
 
+        expected_symbol = previous_piece.symbol()
         detected, score = classify_square(
             crop,
-            templates
+            templates,
+            expected_symbol=expected_symbol,
+            match_threshold=FAST_ABSENCE_MATCH_THRESHOLD
         )
-        if detected is not None:
+        if detected == expected_symbol:
             return False, (
-                f"{label} still occupied "
-                f"({detected},{score:.3f})"
+                f"{label} still contains {expected_symbol} "
+                f"({score:.3f})"
             )
 
         return True, f"{label}=empty"
 
-    source_ok, source_reason = require_empty(
+    source_ok, source_reason = require_piece_absent(
         move.from_square,
         "source"
     )
