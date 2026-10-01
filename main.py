@@ -1082,27 +1082,99 @@ def _new_game_screen_exact_count(
     return exact
 
 
-def _new_game_detected_piece_count(
-    grid,
-    confidence,
+def _new_game_expected_fallback_exact_count(
+    frame,
+    candidate_board,
+    board_coords,
     black_perspective
 ):
-    """Count confidently classified occupied squares.
+    """Re-check only mismatched occupied squares using the expected piece.
 
-    A blank/non-board UI can produce a handful of false template matches.
-    A real chess starting position has 32 occupied squares, including after
-    White's first move. This count is therefore used as a board-presence gate
-    before accepting START / START+WHITE-MOVE.
+    The normal fast scan can occasionally confuse visually similar templates
+    such as rook/bishop. Use the same expected-piece fallback as the normal
+    full-board verifier, but only for the single best new-game candidate so
+    matchmaking remains fast.
     """
+    if frame is None:
+        return 0
+
+    grid, confidence, _ = scan_board(
+        frame,
+        board_coords
+    )
+
     observed = grid_conf_dict(
         grid,
         confidence,
         black_perspective
     )
 
+    templates = get_scaled_templates(
+        board_coords[2] / 8.0,
+        board_coords[3] / 8.0
+    )
+
+    exact = 0
+
+    for square in chess.SQUARES:
+        observed_symbol, _ = observed.get(
+            square,
+            (None, 999.0)
+        )
+
+        piece = candidate_board.piece_at(
+            square
+        )
+
+        expected_symbol = (
+            piece.symbol()
+            if piece is not None
+            else None
+        )
+
+        if observed_symbol == expected_symbol:
+            exact += 1
+            continue
+
+        if expected_symbol is None:
+            continue
+
+        crop = get_square_crop(
+            frame,
+            board_coords,
+            square,
+            black_perspective
+        )
+
+        expected_detected, _ = classify_square(
+            crop,
+            templates,
+            expected_symbol=expected_symbol,
+            match_threshold=FULL_BOARD_EXPECTED_MATCH_THRESHOLD
+        )
+
+        if expected_detected == expected_symbol:
+            exact += 1
+
+    return exact
+
+
+def _new_game_detected_piece_count(
+    grid,
+    confidence,
+    black_perspective
+):
+    """Count occupied squares reported by the board scan.
+
+    Matchmaking must reject sparse false matches, but it should not reject a
+    real board merely because a few extra UI pixels were classified as a
+    piece. The strict START / START+WHITE-MOVE verification below remains the
+    actual acceptance gate.
+    """
     return sum(
         1
-        for symbol, _ in observed.values()
+        for row in grid
+        for symbol in row
         if symbol is not None
     )
 
@@ -1142,41 +1214,11 @@ def detect_new_game_state(
         False
     )
 
-    if (
-        detected_piece_count < MATCH_NEW_GAME_MIN_DETECTED_PIECES
-        or detected_piece_count > MATCH_NEW_GAME_MAX_DETECTED_PIECES
-    ):
+    if detected_piece_count < MATCH_NEW_GAME_MIN_DETECTED_PIECES:
         return None
 
     start_board = chess.Board(
         INITIAL_FEN
-    )
-
-    perspective = detect_board_orientation(
-        grid,
-        start_board
-    )
-
-    detected_piece_count = _new_game_detected_piece_count(
-        grid,
-        confidence,
-        perspective
-    )
-
-    if (
-        detected_piece_count < MATCH_NEW_GAME_MIN_DETECTED_PIECES
-        or detected_piece_count > MATCH_NEW_GAME_MAX_DETECTED_PIECES
-    ):
-        return None
-
-    stockfish_color_now = detect_bottom_stockfish_color(
-        perspective
-    )
-
-    human_color_now = (
-        chess.BLACK
-        if stockfish_color_now == chess.WHITE
-        else chess.WHITE
     )
 
     candidates = [
@@ -1187,8 +1229,9 @@ def detect_new_game_state(
         )
     ]
 
-    # The fresh match may already contain White's first move:
-    # human White or Stockfish White are both accepted here.
+    # The fresh match may already contain White's first move. Preserve the
+    # existing project behavior and consider every legal White first move,
+    # regardless of which color is assigned to Stockfish.
     for move in start_board.legal_moves:
         candidates.append(
             (
@@ -1203,22 +1246,31 @@ def detect_new_game_state(
 
     scored = []
 
-    for kind, first_move, candidate_board in candidates:
-        exact = _new_game_screen_exact_count(
-            grid,
-            confidence,
-            candidate_board,
-            perspective
-        )
-
-        scored.append(
-            (
-                exact,
-                kind,
-                first_move,
-                candidate_board
+    # IMPORTANT: do not trust detect_board_orientation() here. On a blank or
+    # partially rendered screen it can choose the wrong perspective from a
+    # handful of false template matches. Score both orientations and let the
+    # fully verified candidate decide.
+    for perspective in (
+        False,
+        True
+    ):
+        for kind, first_move, candidate_board in candidates:
+            exact = _new_game_screen_exact_count(
+                grid,
+                confidence,
+                candidate_board,
+                perspective
             )
-        )
+
+            scored.append(
+                (
+                    exact,
+                    kind,
+                    first_move,
+                    candidate_board,
+                    perspective
+                )
+            )
 
     scored.sort(
         reverse=True,
@@ -1228,15 +1280,44 @@ def detect_new_game_state(
         )
     )
 
-    exact, kind, first_move, candidate_board = scored[0]
+    exact, kind, first_move, candidate_board, perspective = scored[0]
+
+    # Recover the common rook/bishop (or similar-template) scan confusion on
+    # the single strongest candidate instead of rejecting the real board.
+    if exact < MATCH_NEW_GAME_MIN_EXACT:
+        fallback_exact = _new_game_expected_fallback_exact_count(
+            frame,
+            candidate_board,
+            board_coords,
+            perspective
+        )
+
+        if fallback_exact > exact:
+            exact = fallback_exact
 
     if exact < MATCH_NEW_GAME_MIN_EXACT:
+        progress(
+            "MATCH",
+            (
+                "board candidate rejected | "
+                f"pieces={detected_piece_count} "
+                f"best_exact={exact}/64 "
+                f"perspective={'BLACK' if perspective else 'WHITE'}"
+            ),
+            key="new_match_candidate_reject",
+            interval=0.50
+        )
         return None
 
-    # Candidate position must explain the board strongly enough on the
-    # same frame; generic UI screens are rejected by the piece-count gate.
-    if exact < MATCH_NEW_GAME_MIN_EXACT:
-        return None
+    stockfish_color_now = detect_bottom_stockfish_color(
+        perspective
+    )
+
+    human_color_now = (
+        chess.BLACK
+        if stockfish_color_now == chess.WHITE
+        else chess.WHITE
+    )
 
     first_reason = (
         f"new-game candidate exact={exact}/64 "
@@ -1269,6 +1350,9 @@ def detect_new_game_state(
         perspective
     )
 
+    if confirm_piece_count < MATCH_NEW_GAME_MIN_DETECTED_PIECES:
+        return None
+
     confirm_exact = _new_game_screen_exact_count(
         confirm_grid,
         confirm_confidence,
@@ -1276,11 +1360,30 @@ def detect_new_game_state(
         perspective
     )
 
-    if (
-        confirm_piece_count < MATCH_NEW_GAME_MIN_DETECTED_PIECES
-        or confirm_piece_count > MATCH_NEW_GAME_MAX_DETECTED_PIECES
-        or confirm_exact < MATCH_NEW_GAME_MIN_EXACT
-    ):
+    if confirm_exact < MATCH_NEW_GAME_MIN_EXACT:
+        confirm_exact_fallback = (
+            _new_game_expected_fallback_exact_count(
+                confirm_frame,
+                candidate_board,
+                board_coords,
+                perspective
+            )
+        )
+
+        if confirm_exact_fallback > confirm_exact:
+            confirm_exact = confirm_exact_fallback
+
+    if confirm_exact < MATCH_NEW_GAME_MIN_EXACT:
+        progress(
+            "MATCH",
+            (
+                "candidate changed before confirmation | "
+                f"first={exact}/64 confirm={confirm_exact}/64 "
+                f"pieces={confirm_piece_count}"
+            ),
+            key="new_match_confirm_reject",
+            interval=0.50
+        )
         return None
 
     second_reason = (
@@ -1290,7 +1393,7 @@ def detect_new_game_state(
 
     return {
         "frame": confirm_frame,
-        "grid": grid,
+        "grid": confirm_grid,
         "scan_ms": scan_ms,
         "perspective": perspective,
         "stockfish_color": stockfish_color_now,
