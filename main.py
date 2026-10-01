@@ -492,7 +492,11 @@ def perform_match_action(sct, hwnd, action):
     )
 
 
-def match_ui_draw(display_frame, match_ui):
+def match_ui_draw(
+    display_frame,
+    match_ui,
+    board_coords=None
+):
     if match_ui is None:
         return
 
@@ -504,76 +508,195 @@ def match_ui_draw(display_frame, match_ui):
     ):
         match_ui[key] = None
 
-    phase = match_ui.get("phase")
-
-    if phase not in ("RESULT", "AWAIT_RESULT", "MATCHMAKING"):
-        return
-
     height, width = display_frame.shape[:2]
 
     panel_w = min(
-        620,
-        max(420, width - 16)
+        560,
+        max(460, width - 16)
     )
-    panel_h = 108
+    panel_h = 150
 
-    x1 = max(
-        8,
-        width - panel_w - 8
+    # Always place controls outside the chess board.
+    if board_coords is None:
+        panel_x = max(
+            8,
+            width - panel_w - 8
+        )
+        panel_y = 52
+    else:
+        bx, by, bw, bh = board_coords
+        board_rect = (
+            bx,
+            by,
+            bx + bw,
+            by + bh
+        )
+
+        candidates = [
+            (bx + bw + 10, max(52, by)),
+            (bx - panel_w - 10, max(52, by)),
+            (max(8, bx), max(8, by - panel_h - 10)),
+            (max(8, bx), min(height - panel_h - 8, by + bh + 10)),
+            (8, 52),
+            (max(8, width - panel_w - 8), 52),
+        ]
+
+        def intersects(rect):
+            x1, y1, x2, y2 = rect
+            return not (
+                x2 <= board_rect[0]
+                or x1 >= board_rect[2]
+                or y2 <= board_rect[1]
+                or y1 >= board_rect[3]
+            )
+
+        panel_x, panel_y = candidates[-1]
+
+        for cx, cy in candidates:
+            rect = (
+                cx,
+                cy,
+                cx + panel_w,
+                cy + panel_h
+            )
+
+            if (
+                cx >= 4
+                and cy >= 4
+                and cx + panel_w <= width - 4
+                and cy + panel_h <= height - 4
+                and not intersects(rect)
+            ):
+                panel_x, panel_y = cx, cy
+                break
+
+    panel_x = max(
+        4,
+        min(width - panel_w - 4, panel_x)
     )
-    y1 = max(
-        8,
-        height - panel_h - 12
+    panel_y = max(
+        4,
+        min(height - panel_h - 4, panel_y)
     )
-    x2 = min(
-        width - 8,
-        x1 + panel_w
+
+    match_ui["controls_rect"] = (
+        panel_x,
+        panel_y,
+        panel_x + panel_w,
+        panel_y + panel_h
     )
-    y2 = min(
-        height - 8,
-        y1 + panel_h
+
+    overlay = display_frame.copy()
+
+    cv2.rectangle(
+        overlay,
+        (panel_x, panel_y),
+        (
+            panel_x + panel_w,
+            panel_y + panel_h
+        ),
+        (18, 18, 18),
+        -1
+    )
+
+    display_frame[:] = cv2.addWeighted(
+        overlay,
+        0.84,
+        display_frame,
+        0.16,
+        0
     )
 
     cv2.rectangle(
         display_frame,
-        (x1, y1),
-        (x2, y2),
-        (20, 20, 20),
-        -1
+        (panel_x, panel_y),
+        (
+            panel_x + panel_w,
+            panel_y + panel_h
+        ),
+        (0, 255, 255),
+        1
     )
 
-    if phase == "MATCHMAKING":
-        cv2.putText(
-            display_frame,
-            "WAITING FOR NEW MATCH...",
-            (x1 + 14, y1 + 30),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.60,
-            (0, 255, 255),
-            2
-        )
-
-        cv2.putText(
-            display_frame,
-            "Grid locked | scanning for new board",
-            (x1 + 14, y1 + 58),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.40,
-            (255, 255, 255),
-            1
-        )
-
-        return
+    phase_text = {
+        "GAME": "GAME",
+        "RESULT": "RESULT SCREEN",
+        "AWAIT_RESULT": "WAITING FOR RESULT SCREEN",
+        "MATCHMAKING": "WAITING FOR NEW MATCH",
+        "IDLE": "READY"
+    }.get(
+        match_ui.get("phase", "IDLE"),
+        match_ui.get("phase", "IDLE")
+    )
 
     cv2.putText(
         display_frame,
-        match_ui.get(
-            "result_text",
-            "WAITING FOR NEW MATCH..."
-        ),
-        (x1 + 14, y1 + 22),
+        f"MATCH: {phase_text}",
+        (panel_x + 12, panel_y + 20),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.43,
+        (0, 255, 255),
+        1
+    )
+
+    pref = match_ui.get(
+        "preference",
+        {}
+    )
+
+    def cp_text(value):
+        if value is None:
+            return "-"
+        try:
+            return f"{float(value) / 100.0:+.2f}"
+        except Exception:
+            return str(value)
+
+    cv2.putText(
+        display_frame,
+        (
+            f"STOCKFISH PREFERENCE "
+            f"BEST:{pref.get('best','-')} {cp_text(pref.get('best_cp'))} "
+            f"SELECTED:{pref.get('selected','-')} {cp_text(pref.get('selected_cp'))} "
+            f"RANK:{pref.get('rank','-')}"
+        ),
+        (panel_x + 12, panel_y + 41),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.38,
+        (255, 255, 255),
+        1
+    )
+
+    cv2.putText(
+        display_frame,
+        f"REASON: {str(pref.get('reason','-'))[:82]}",
+        (panel_x + 12, panel_y + 59),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.32,
+        (220, 220, 220),
+        1
+    )
+
+    obstruction = float(
+        match_ui.get(
+            "board_obstruction",
+            0.0
+        )
+    )
+
+    guard_text = (
+        f"BOARD VISIBILITY: {(1.0 - obstruction) * 100:.1f}%"
+    )
+
+    if match_ui.get("screen_guard"):
+        guard_text += " | PAUSED >30% HIDDEN"
+
+    cv2.putText(
+        display_frame,
+        guard_text,
+        (panel_x + 12, panel_y + 77),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.35,
         (0, 255, 255),
         1
     )
@@ -588,9 +711,9 @@ def match_ui_draw(display_frame, match_ui):
     cv2.putText(
         display_frame,
         f"AUTO ACTION: {auto_action}",
-        (x1 + 14, y1 + 43),
+        (panel_x + 12, panel_y + 95),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.40,
+        0.35,
         (255, 255, 255),
         1
     )
@@ -603,23 +726,23 @@ def match_ui_draw(display_frame, match_ui):
     )
 
     gap = 7
-    button_h = 25
-    usable_w = x2 - x1 - 28
+    button_h = 26
+    usable_w = panel_w - 24
     button_w = max(
-        74,
+        82,
         int((usable_w - gap * 3) / 4)
     )
 
-    by = y1 + 63
+    by = panel_y + 108
 
     for index, (label, rect_key) in enumerate(labels):
-        bx1 = x1 + 14 + index * (button_w + gap)
+        bx1 = panel_x + 12 + index * (button_w + gap)
         bx2 = min(
-            x2 - 14,
+            panel_x + panel_w - 12,
             bx1 + button_w
         )
         by2 = min(
-            y2 - 10,
+            panel_y + panel_h - 8,
             by + button_h
         )
 
