@@ -997,7 +997,8 @@ def square_change_score(
         after_frame,
         board_coords,
         square,
-        black_perspective    )
+        black_perspective
+    )
 
     if (
         before_gray is None
@@ -1997,6 +1998,7 @@ def move_transition_strength(
             square,
             black_perspective
         )
+
         values[square] = value
         total += value
 
@@ -2995,7 +2997,8 @@ def ultra_board_delta_recovery(
         key=lambda item: item[0]
     )
 
-    if not candidates_a:        return None, None
+    if not candidates_a:
+        return None, None
 
     best_total, best_move, best_a, best_b = candidates_a[0]
     second_total = (
@@ -3994,7 +3997,8 @@ def detect_human_move(
                         )
 
                     progress(
-                        "HUMAN",                        (
+                        "HUMAN",
+                        (
                             f"candidate {best_move.uci()} rejected by "
                             f"physical board check: {physical_reason}"
                         ),
@@ -4993,7 +4997,8 @@ def full_board_state_confirmed(
         if len(mismatches) > 6:
             preview += f"; +{len(mismatches) - 6} more"
         return False, (
-            f"full-board mismatch {len(mismatches)}/64 ({preview})"        )
+            f"full-board mismatch {len(mismatches)}/64 ({preview})"
+        )
 
     return True, f"full-board match 64/64 scan={scan_ms:.1f}ms"
 
@@ -5992,6 +5997,7 @@ def choose_stockfish_move(
             if mover == chess.WHITE
             else -previous_eval_white_cp
         )
+
     if (
         reference_cp is not None
         and reference_cp >= FORCE_BEST_MIN_CP
@@ -6991,7 +6997,8 @@ def format_board_for_screen(
     for rank in ranks:
         row = []
 
-        for file_ in files:            piece = board.piece_at(
+        for file_ in files:
+            piece = board.piece_at(
                 chess.square(
                     file_,
                     rank
@@ -7990,7 +7997,8 @@ def main():
                                     sct,
                                     scrcpy_hwnd,
                                     expected_human_board,
-                                    baseline_frame,                                    cached_board_coords,
+                                    baseline_frame,
+                                    cached_board_coords,
                                     visual_black_perspective,
                                     move,
                                     board.copy(stack=False)
