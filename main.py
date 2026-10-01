@@ -34,7 +34,7 @@ EMPTY_STD_THRESHOLD = 4.5
 
 # Fast bot interaction timing.
 BOT_START_DELAY = 0.0
-CLICK_DELAY = 0.001
+CLICK_DELAY = 0.0
 CLICK_SETTLE_DELAY = 0.0
 CLICK_CURSOR_SETTLE_MIN = 0.0
 CLICK_CURSOR_SETTLE_MAX = 0.0
@@ -45,8 +45,8 @@ CLICK_HOLD_MAX = 0.0
 # actually selected. This prevents a bad source click (for example selecting
 # a queen when Stockfish asked for a bishop) from turning into a legal but
 # wrong move such as Qxg5 instead of Bxg5.
-BOT_SOURCE_SELECT_TIMEOUT = 0.16
-BOT_SOURCE_SELECT_POLL = 0.003
+BOT_SOURCE_SELECT_TIMEOUT = 0.035
+BOT_SOURCE_SELECT_POLL = 0.001
 BOT_SOURCE_SELECT_CHANGE_MIN = 0.0012
 BOT_SOURCE_SELECT_MAX_EXTRA_CHANGES = 0
 BOT_SOURCE_SELECT_DOMINANCE_RATIO = 0.80
@@ -56,7 +56,7 @@ PROMOTION_WAIT = 0.050
 PROMOTION_RETRIES = 5
 SCAN_INTERVAL = 0.006
 ORIENTATION_TIMEOUT = 1.2
-HUMAN_MOVE_TIMEOUT = 1.25
+HUMAN_MOVE_TIMEOUT = 0.15
 HUMAN_CONFIRM_SAMPLES = 1
 HUMAN_SETTLE_TIMEOUT = 0.004
 HUMAN_FALLBACK_CHANGE_THRESHOLD = 0.0012
@@ -93,10 +93,10 @@ TURN_RESCAN_CONFIRM_DELAY = 0.025
 TURN_RESCAN_MAX_MISMATCH = 0
 TURN_RESCAN_TOP_CANDIDATES = 6
 
-BOT_VERIFY_TIMEOUT = 0.35
+BOT_VERIFY_TIMEOUT = 0.120
 BOT_CONFIRM_SAMPLES = 1
 BOT_CLICK_RETRIES = 2
-BOT_RECOVERY_POLL = 0.001
+BOT_RECOVERY_POLL = 0.0005
 
 # A bot move is considered physically completed only when the expected
 # source/target transition is visible with a meaningful pixel change.
@@ -138,7 +138,7 @@ PROMOTION_FALLBACK = True
 # the squares that are supposed to change. This keeps the same safety invariant:
 # the pre-verified board must change only where the move allows, and the
 # changed squares must contain the exact expected pieces.
-FAST_VERIFY_SIZE = 96
+FAST_VERIFY_SIZE = 64
 FAST_UNCHANGED_MAX_DIFF = 0.055
 FAST_UNEXPECTED_STRONG_DIFF = 0.085
 FAST_REQUIRED_CHANGED_DIFF = 0.0010
@@ -149,10 +149,10 @@ FAST_DEEP_VERIFY_EVERY = 8
 # affected-square state check on two consecutive fresh frames. Full-board
 # template scanning remains a recovery/desync authority, never the normal
 # move hot path.
-FAST_POST_CONFIRM_TIMEOUT = 0.045
-FAST_POST_CONFIRM_POLL = 0.0008
-FAST_POST_CONFIRM_GAP = 0.0015
-HUMAN_FAST_MAX_TOTAL_TIME = 0.060
+FAST_POST_CONFIRM_TIMEOUT = 0.035
+FAST_POST_CONFIRM_POLL = 0.0003
+FAST_POST_CONFIRM_GAP = 0.0
+HUMAN_FAST_MAX_TOTAL_TIME = 0.035
 
 # Ultra-fast human move rescan. This uses the same 96x96 vectorized
 # board-motion map as bot verification and checks only the most plausible
@@ -160,8 +160,8 @@ HUMAN_FAST_MAX_TOTAL_TIME = 0.060
 HUMAN_FAST_RESCAN_THRESHOLD = 0.00045
 HUMAN_FAST_RESCAN_TOP_SQUARES = 12
 HUMAN_FAST_RESCAN_TOP_MOVES = 6
-HUMAN_FAST_RESCAN_POLL = 0.0010
-HUMAN_FAST_RESCAN_CONFIRM_TIMEOUT = 0.060
+HUMAN_FAST_RESCAN_POLL = 0.0003
+HUMAN_FAST_RESCAN_CONFIRM_TIMEOUT = 0.035
 
 
 # Template position guards.
@@ -275,12 +275,15 @@ _FRAME_SQUARE_CACHE_MAX = 4
 _GRID_CONF_CACHE = {}
 _GRID_CONF_CACHE_MAX = 8
 
+_FAST_CAPTURE_ORIGIN_CACHE = {}
+
 
 def clear_runtime_caches():
     """Clear transient image/geometry caches."""
     _SQUARE_GEOMETRY_CACHE.clear()
     _FRAME_SQUARE_CACHE.clear()
     _GRID_CONF_CACHE.clear()
+    _FAST_CAPTURE_ORIGIN_CACHE.clear()
 
 
 PROGRESS_INTERVAL = 0.35
@@ -544,6 +547,86 @@ def capture_screen(sct, hwnd=None):
         )
 
     return raw[:, :, :3].copy()
+
+
+def capture_board_roi(sct, hwnd, board_coords):
+    """Capture only the locked chess-board ROI for fast verification."""
+    if sct is None or hwnd is None or not user32 or not user32.IsWindow(hwnd):
+        return None
+    try:
+        x, y, w, h = (int(v) for v in board_coords)
+    except Exception:
+        return None
+    if w <= 0 or h <= 0:
+        return None
+    origin = _FAST_CAPTURE_ORIGIN_CACHE.get(hwnd)
+    if origin is None:
+        origin = get_scrcpy_screen_origin(hwnd)
+        if origin is None:
+            return None
+        _FAST_CAPTURE_ORIGIN_CACHE[hwnd] = origin
+    ox, oy = origin
+    try:
+        raw = np.asarray(sct.grab({
+            "left": ox + x, "top": oy + y, "width": w, "height": h
+        }))
+    except Exception:
+        return None
+    if raw.ndim != 3 or raw.shape[2] < 3:
+        return None
+    return raw[:, :, :3]
+
+
+def _fast_board_view(frame, board_coords):
+    """Return board-only data from either a full screenshot or ROI capture."""
+    if frame is None:
+        return None
+    try:
+        x, y, w, h = (int(v) for v in board_coords)
+    except Exception:
+        return None
+    if frame.shape[0] == h and frame.shape[1] == w:
+        return frame
+    if frame.ndim < 2:
+        return None
+    x1, y1 = max(0, x), max(0, y)
+    x2 = min(frame.shape[1], x + w)
+    y2 = min(frame.shape[0], y + h)
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return frame[y1:y2, x1:x2]
+
+
+def _fast_square_crop(frame, board_coords, square, black_perspective):
+    board = _fast_board_view(frame, board_coords)
+    if board is None or board.size == 0:
+        return None
+    _, _, w, h = (int(v) for v in board_coords)
+    sq_w, sq_h = w / 8.0, h / 8.0
+    file_ = chess.square_file(square)
+    rank_ = chess.square_rank(square)
+    if black_perspective:
+        col, row = 7 - file_, rank_
+    else:
+        col, row = file_, 7 - rank_
+    x1, y1 = int(col * sq_w), int(row * sq_h)
+    x2, y2 = int((col + 1) * sq_w), int((row + 1) * sq_h)
+    crop = board[y1:y2, x1:x2]
+    return crop if crop.size else None
+
+
+def compose_verified_full_frame(before_full_frame, verified_board_roi, board_coords):
+    if before_full_frame is None or verified_board_roi is None:
+        return before_full_frame
+    try:
+        x, y, w, h = (int(v) for v in board_coords)
+        out = before_full_frame.copy()
+        bh = min(h, verified_board_roi.shape[0])
+        bw = min(w, verified_board_roi.shape[1])
+        out[y:y + bh, x:x + bw] = verified_board_roi[:bh, :bw, :3]
+        return out
+    except Exception:
+        return before_full_frame
 
 
 def classify_square(
@@ -1517,142 +1600,50 @@ def _verify_source_click_selected(
 
 
 def click_move(
-    move,
-    board_coords,
-    black_perspective,
-    scrcpy_hwnd,
-    sct=None,
-    promotion_color=None
+    move, board_coords, black_perspective, scrcpy_hwnd, sct=None, promotion_color=None
 ):
-    if not focus_scrcpy(
-        scrcpy_hwnd
-    ):
-        print(
-            "[BOT ERROR] Could not focus scrcpy window."
-        )
-
+    if not focus_scrcpy(scrcpy_hwnd):
+        print("[BOT ERROR] Could not focus scrcpy window.")
         return False
 
-    # SPEED OPTIMIZATION:
-    # Only resolve the scrcpy screen origin once for source + target.
-    screen_origin = get_scrcpy_screen_origin(
-        scrcpy_hwnd
-    )
-
+    screen_origin = get_scrcpy_screen_origin(scrcpy_hwnd)
     if screen_origin is None:
-        print(
-            "[BOT ERROR] Could not determine scrcpy screen origin."
-        )
+        print("[BOT ERROR] Could not determine scrcpy screen origin.")
         return False
 
-    # Re-sample both pickup and drop points for every click attempt. Every
-    # point remains inside the centered 40%-area circle of its own square.
     sx, sy = square_screen_center(
-        move.from_square,
-        board_coords,
-        black_perspective,
-        scrcpy_hwnd,
-        screen_origin=screen_origin
+        move.from_square, board_coords, black_perspective,
+        scrcpy_hwnd, screen_origin=screen_origin
     )
-
     tx, ty = square_screen_center(
-        move.to_square,
-        board_coords,
-        black_perspective,
-        scrcpy_hwnd,
-        screen_origin=screen_origin
+        move.to_square, board_coords, black_perspective,
+        scrcpy_hwnd, screen_origin=screen_origin
     )
 
-    print(
-        f"[BOT CLICK] {move.uci()} "
-        f"source=({sx},{sy}) target=({tx},{ty})"
-    )
+    print(f"[BOT CLICK] {move.uci()} source=({sx},{sy}) target=({tx},{ty})")
 
-    # Keep the mouse cursor completely away from the chess board between
-    # moves. This prevents it from remaining on the previous source/target.
-    user32.SetCursorPos(0, 0)
-    time.sleep(0.010)
+    user32.SetCursorPos(int(sx), int(sy))
+    user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+    time.sleep(0.006)
+    user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+    time.sleep(0.003)
 
-    # Select the locked source with a real press/hold/release sequence.
-    # The slightly longer hold makes source registration more reliable
-    # through scrcpy than the previous zero-duration dispatch.
-    user32.SetCursorPos(
-        int(sx),
-        int(sy)
-    )
-    time.sleep(0.020)
-    user32.mouse_event(
-        MOUSEEVENTF_LEFTDOWN,
-        0,
-        0,
-        0,
-        0
-    )
-    time.sleep(0.035)
-    user32.mouse_event(
-        MOUSEEVENTF_LEFTUP,
-        0,
-        0,
-        0,
-        0
-    )
-
-    time.sleep(0.025)
-
-    # Drop only on the locked destination, again using a real
-    # press/hold/release sequence.
-    user32.SetCursorPos(
-        int(tx),
-        int(ty)
-    )
-    time.sleep(0.020)
-    user32.mouse_event(
-        MOUSEEVENTF_LEFTDOWN,
-        0,
-        0,
-        0,
-        0
-    )
-    time.sleep(0.030)
-    user32.mouse_event(
-        MOUSEEVENTF_LEFTUP,
-        0,
-        0,
-        0,
-        0
-    )
-
-    # Immediately park the cursor outside the board. It must not sit on
-    # the old move while the system is waiting for the verified result.
-    user32.SetCursorPos(0, 0)
-    time.sleep(0.010)
+    user32.SetCursorPos(int(tx), int(ty))
+    user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+    time.sleep(0.006)
+    user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
 
     if move.promotion is not None:
         if promotion_color is None:
             promotion_color = chess.WHITE
-
         if sct is None:
-            print(
-                "[PROMOTION ERROR] "
-                "Screen capture context unavailable."
-            )
-
+            print("[PROMOTION ERROR] Screen capture context unavailable.")
             return False
-
-        promotion_ok = select_promotion_piece(
-            sct,
-            scrcpy_hwnd,
-            move,
-            promotion_color,
-            board_coords,
-            black_perspective
+        return select_promotion_piece(
+            sct, scrcpy_hwnd, move, promotion_color, board_coords, black_perspective
         )
-
-        # After promotion is also completed, keep the cursor off the board.
-        user32.SetCursorPos(0, 0)
-        return promotion_ok
-
     return True
+
 
 def expected_changed_squares(
     board,
@@ -2292,124 +2283,72 @@ def human_direct_state_confirmed(
 
 
 def fast_human_move_rescan(
-    sct,
-    hwnd,
-    board,
-    baseline_frame,
-    board_coords,
-    black_perspective,
-    legal_moves
+    sct, hwnd, board, baseline_frame, board_coords, black_perspective, legal_moves
 ):
-    """Low-latency human move detector with a strict double-frame gate.
-
-    The hot path never performs a 64-square template scan. Motion is first
-    reduced to a small 96x96 board map, legal candidates are derived from the
-    changed source/destination squares, and the exact post-state is checked
-    twice on fresh frames before returning the move.
-
-    The important invariant is unchanged: the internal python-chess board is
-    not advanced until the physical screen has positively confirmed the exact
-    legal move. Full-board reconstruction remains available in the recovery
-    path when this fast path cannot explain the change.
-    """
+    """Fast human detection from board-only captures."""
     if baseline_frame is None or not legal_moves:
+        return None, None
+    baseline_board = _fast_board_view(baseline_frame, board_coords)
+    if baseline_board is None:
         return None, None
 
     start = time.perf_counter()
     last_frame = None
-
     while time.perf_counter() - start < HUMAN_FAST_MAX_TOTAL_TIME:
-        frame = capture_screen(sct, hwnd)
+        frame = capture_board_roi(sct, hwnd, board_coords)
         if frame is None:
-            time.sleep(HUMAN_FAST_RESCAN_POLL)
             continue
-
         last_frame = frame
+
         changed = fast_square_motion_scores(
-            baseline_frame,
-            frame,
-            board_coords,
-            black_perspective
+            baseline_board, frame, board_coords, black_perspective
         )
         if changed is None:
             continue
 
-        # Avoid sorting all 64 squares. Only keep the strongest changed
-        # squares using a bounded top-k selection.
         ranked = sorted(
-            ((score, square) for square, score in changed.items()
+            ((score, sq) for sq, score in changed.items()
              if score >= HUMAN_FAST_RESCAN_THRESHOLD),
-            reverse=True,
-            key=lambda item: item[0]
+            reverse=True, key=lambda item: item[0]
         )[:HUMAN_FAST_RESCAN_TOP_SQUARES]
-
         if len(ranked) < 2:
             continue
 
-        top_squares = {square for _, square in ranked}
+        top = {sq for _, sq in ranked}
         candidates = []
-
         for move in legal_moves:
-            if move.from_square not in top_squares or move.to_square not in top_squares:
+            if move.from_square not in top or move.to_square not in top:
                 continue
-
             source_change = changed.get(move.from_square, 0.0)
             target_change = changed.get(move.to_square, 0.0)
-            if (source_change < HUMAN_FAST_RESCAN_THRESHOLD or
-                    target_change < HUMAN_FAST_RESCAN_THRESHOLD):
+            if source_change < HUMAN_FAST_RESCAN_THRESHOLD or target_change < HUMAN_FAST_RESCAN_THRESHOLD:
                 continue
-
-            affected = expected_changed_squares(board, move)
-            total_change = sum(changed.get(square, 0.0) for square in affected)
-            candidates.append((total_change, move))
+            total = sum(changed.get(sq, 0.0) for sq in expected_changed_squares(board, move))
+            candidates.append((total, move))
 
         if not candidates:
             continue
-
         candidates.sort(reverse=True, key=lambda item: item[0])
 
-        # Check only the strongest few legal explanations. Each candidate
-        # itself must pass the exact source/destination state gate.
         for _, move in candidates[:HUMAN_FAST_RESCAN_TOP_MOVES]:
-            ok, reason = fast_expected_post_state_confirmed(
-                baseline_frame,
-                frame,
-                board,
-                move,
-                board_coords,
-                black_perspective
+            ok, _ = fast_expected_post_state_confirmed(
+                baseline_board, frame, board, move, board_coords, black_perspective
             )
             if not ok:
                 continue
 
-            # A single matching frame can be a transient animation/touch
-            # frame. Confirm the SAME move once more before accepting it.
-            confirm_start = time.perf_counter()
-            while time.perf_counter() - confirm_start < FAST_POST_CONFIRM_TIMEOUT:
-                time.sleep(FAST_POST_CONFIRM_GAP)
-                confirm_frame = capture_screen(sct, hwnd)
+            confirm_deadline = time.perf_counter() + FAST_POST_CONFIRM_TIMEOUT
+            while time.perf_counter() < confirm_deadline:
+                confirm_frame = capture_board_roi(sct, hwnd, board_coords)
                 if confirm_frame is None:
                     continue
-
-                confirm_ok, confirm_reason = fast_expected_post_state_confirmed(
-                    baseline_frame,
-                    confirm_frame,
-                    board,
-                    move,
-                    board_coords,
-                    black_perspective
+                confirm_ok, _ = fast_expected_post_state_confirmed(
+                    baseline_board, confirm_frame, board, move, board_coords, black_perspective
                 )
                 if confirm_ok:
-                    progress(
-                        "HUMAN",
-                        f"FAST verified {move.uci()} | double-frame physical PASS",
-                        key="human_fast_verify",
-                        force=True
+                    return move, compose_verified_full_frame(
+                        baseline_frame, confirm_frame, board_coords
                     )
-                    return move, confirm_frame
-
-                # The candidate vanished; do not keep waiting on an invalid
-                # move. Go back to the outer detector for a new candidate.
                 break
 
     return None, last_frame
@@ -4434,18 +4373,27 @@ def _fast_board_gray(frame, board_coords, size=FAST_VERIFY_SIZE):
 
 
 def fast_board_motion_map(before_frame, after_frame, board_coords):
-    before = _fast_board_gray(before_frame, board_coords)
-    after = _fast_board_gray(after_frame, board_coords)
-    if before is None or after is None:
+    """Fast 64-cell board motion map."""
+    before_board = _fast_board_view(before_frame, board_coords)
+    after_board = _fast_board_view(after_frame, board_coords)
+    if before_board is None or after_board is None:
         return None
+    before = cv2.cvtColor(
+        cv2.resize(before_board, (FAST_VERIFY_SIZE, FAST_VERIFY_SIZE), interpolation=cv2.INTER_AREA),
+        cv2.COLOR_BGR2GRAY
+    )
+    after = cv2.cvtColor(
+        cv2.resize(after_board, (FAST_VERIFY_SIZE, FAST_VERIFY_SIZE), interpolation=cv2.INTER_AREA),
+        cv2.COLOR_BGR2GRAY
+    )
     diff = cv2.absdiff(before, after).astype(np.float32) / 255.0
     cell = FAST_VERIFY_SIZE // 8
     scores = {}
     for row in range(8):
         for col in range(8):
-            value = float(np.mean(diff[row*cell:(row+1)*cell, col*cell:(col+1)*cell]))
-            # Map visual row/col to chess square later in caller.
-            scores[(row, col)] = value
+            scores[(row, col)] = float(np.mean(
+                diff[row*cell:(row+1)*cell, col*cell:(col+1)*cell]
+            ))
     return scores
 
 
@@ -4468,177 +4416,96 @@ def fast_square_motion_scores(before_frame, after_frame, board_coords, black_per
 
 
 def fast_expected_post_state_confirmed(
-    before_frame,
-    after_frame,
-    board,
-    move,
-    board_coords,
-    black_perspective
+    before_frame, after_frame, board, move, board_coords, black_perspective
 ):
-    """MS-level physical post-state verification.
-
-    Safety model:
-      1) One small vectorized board diff rejects unexpected board changes.
-      2) Only squares that THIS legal move can change are classified exactly.
-      3) Source must be empty and destination must contain the exact expected
-         piece; castling/en-passant add their required squares.
-
-    This is intentionally strict enough to catch a wrong legal touch such as
-    Bxg5 becoming Qxg5, while avoiding the expensive 64-square classifier.
-    """
+    """Fast physical verification with no full 64-template scan."""
     if before_frame is None or after_frame is None or move is None:
         return False, "missing verification frame/move"
 
-    observed_changes = fast_square_motion_scores(
-        before_frame,
-        after_frame,
-        board_coords,
-        black_perspective
+    changes = fast_square_motion_scores(
+        before_frame, after_frame, board_coords, black_perspective
     )
-    if observed_changes is None:
+    if changes is None:
         return False, "fast board motion map unavailable"
 
     affected = set(expected_changed_squares(board, move))
+    for sq, value in changes.items():
+        if sq not in affected and value >= FAST_UNEXPECTED_STRONG_DIFF:
+            return False, f"unexpected board change {chess.square_name(sq)}:{value:.3f}"
 
-    # Any strong change outside the squares this exact legal move is allowed
-    # to touch is evidence of a wrong click, extra touch, or unexpected UI
-    # transition. Reject before any piece classification.
-    for square, change in observed_changes.items():
-        if square in affected:
-            continue
-        if change >= FAST_UNEXPECTED_STRONG_DIFF:
-            return False, (
-                f"unexpected board change "
-                f"{chess.square_name(square)}:{change:.3f}"
-            )
-
-    templates = get_scaled_templates(
-        board_coords[2] / 8.0,
-        board_coords[3] / 8.0
-    )
-
-    def expected_piece_at(frame, square, expected_symbol):
-        crop = get_square_crop(
-            frame,
-            board_coords,
-            square,
-            black_perspective
-        )
-        if crop is None:
-            return False, None, 999.0
-
-        if expected_symbol is None:
-            detected, score = classify_square(
-                crop,
-                templates
-            )
-            return detected is None, detected, score
-
-        detected, score = classify_square(
-            crop,
-            templates,
-            expected_symbol=expected_symbol,
-            match_threshold=BOT_POST_MATCH_THRESHOLD
-        )
-        return detected == expected_symbol, detected, score
-
-    # Every normal move needs a real source->destination transition.
-    source_change = observed_changes.get(move.from_square, 0.0)
-    target_change = observed_changes.get(move.to_square, 0.0)
-
+    source_change = changes.get(move.from_square, 0.0)
+    target_change = changes.get(move.to_square, 0.0)
     if source_change < FAST_REQUIRED_CHANGED_DIFF:
         return False, f"source transition too weak {source_change:.4f}"
     if target_change < FAST_REQUIRED_CHANGED_DIFF:
         return False, f"destination transition too weak {target_change:.4f}"
 
-    source_ok, source_detected, source_score = expected_piece_at(
-        after_frame,
-        move.from_square,
-        None
-    )
-    if not source_ok:
-        return False, (
-            f"source not empty after move "
-            f"({source_detected or '-'}:{source_score:.3f})"
-        )
+    templates = get_scaled_templates(board_coords[2] / 8.0, board_coords[3] / 8.0)
 
-    expected_target = expected_symbol_after(
-        board,
-        move,
-        move.to_square
+    source_crop = _fast_square_crop(
+        after_frame, board_coords, move.from_square, black_perspective
     )
+    if source_crop is None:
+        return False, "source crop unavailable"
+    source_detected, source_score = classify_square(source_crop, templates)
+    if source_detected is not None:
+        return False, f"source not empty ({source_detected}:{source_score:.3f})"
+
+    expected_target = expected_symbol_after(board, move, move.to_square)
     if expected_target is None:
         return False, "missing expected destination piece"
 
-    target_ok, target_detected, target_score = expected_piece_at(
-        after_frame,
-        move.to_square,
-        expected_target
+    target_crop = _fast_square_crop(
+        after_frame, board_coords, move.to_square, black_perspective
     )
-    if not target_ok:
+    if target_crop is None:
+        return False, "destination crop unavailable"
+    target_detected, target_score = classify_square(
+        target_crop, templates,
+        expected_symbol=expected_target,
+        match_threshold=BOT_POST_MATCH_THRESHOLD
+    )
+    if target_detected != expected_target:
         return False, (
             f"destination mismatch "
-            f"({target_detected or '-'}:{target_score:.3f}, "
-            f"expected {expected_target})"
+            f"({target_detected or '-'}:{target_score:.3f}, expected {expected_target})"
         )
 
     if board.is_castling(move):
-        if board.is_kingside_castling(move):
-            rook_from = chess.H1 if board.turn == chess.WHITE else chess.H8
-            rook_to = chess.F1 if board.turn == chess.WHITE else chess.F8
-        else:
-            rook_from = chess.A1 if board.turn == chess.WHITE else chess.A8
-            rook_to = chess.D1 if board.turn == chess.WHITE else chess.D8
-
-        rook_from_change = observed_changes.get(rook_from, 0.0)
-        rook_to_change = observed_changes.get(rook_to, 0.0)
-        if rook_from_change < FAST_REQUIRED_CHANGED_DIFF:
-            return False, f"castling rook source transition too weak {rook_from_change:.4f}"
-        if rook_to_change < FAST_REQUIRED_CHANGED_DIFF:
-            return False, f"castling rook destination transition too weak {rook_to_change:.4f}"
-
-        rook_empty_ok, detected, score = expected_piece_at(
-            after_frame,
-            rook_from,
-            None
+        rook_to = (
+            chess.F1 if board.is_kingside_castling(move) and board.turn == chess.WHITE else
+            chess.F8 if board.is_kingside_castling(move) else
+            chess.D1 if board.turn == chess.WHITE else chess.D8
         )
-        if not rook_empty_ok:
-            return False, f"castling rook source not empty ({detected or '-'}:{score:.3f})"
-
-        expected_rook = "R" if board.turn == chess.WHITE else "r"
-        rook_ok, detected, score = expected_piece_at(
-            after_frame,
-            rook_to,
-            expected_rook
+        rook_expected = "R" if board.turn == chess.WHITE else "r"
+        rook_crop = _fast_square_crop(
+            after_frame, board_coords, rook_to, black_perspective
         )
-        if not rook_ok:
-            return False, f"castling rook destination mismatch ({detected or '-'}:{score:.3f})"
+        if rook_crop is None:
+            return False, "castling rook crop unavailable"
+        rook_detected, rook_score = classify_square(
+            rook_crop, templates,
+            expected_symbol=rook_expected,
+            match_threshold=BOT_POST_MATCH_THRESHOLD
+        )
+        if rook_detected != rook_expected:
+            return False, f"castling rook mismatch ({rook_detected or '-'}:{rook_score:.3f})"
 
     if board.is_en_passant(move):
         captured_square = (
-            move.to_square - 8
-            if board.turn == chess.WHITE
+            move.to_square - 8 if board.turn == chess.WHITE
             else move.to_square + 8
         )
-        captured_change = observed_changes.get(captured_square, 0.0)
-        if captured_change < FAST_REQUIRED_CHANGED_DIFF:
-            return False, f"en-passant captured square transition too weak {captured_change:.4f}"
-
-        captured_ok, detected, score = expected_piece_at(
-            after_frame,
-            captured_square,
-            None
+        captured_crop = _fast_square_crop(
+            after_frame, board_coords, captured_square, black_perspective
         )
-        if not captured_ok:
-            return False, (
-                f"en-passant captured square not empty "
-                f"({detected or '-'}:{score:.3f})"
-            )
+        if captured_crop is None:
+            return False, "en-passant crop unavailable"
+        captured_detected, captured_score = classify_square(captured_crop, templates)
+        if captured_detected is not None:
+            return False, f"en-passant captured square not empty ({captured_detected}:{captured_score:.3f})"
 
-    return True, (
-        f"fast physical PASS {move.uci()} "
-        f"transition={source_change:.4f}/{target_change:.4f}"
-    )
+    return True, "fast physical post-state confirmed"
 
 
 def fast_preclick_board_confirmed(
@@ -4840,84 +4707,44 @@ def full_board_state_confirmed(
 
 
 def verify_human_move_on_screen(
-    sct,
-    hwnd,
-    expected_board,
-    frame,
-    board_coords,
-    black_perspective,
-    move,
-    before_board
+    sct, hwnd, expected_board, frame, board_coords, black_perspective, move, before_board
 ):
-    """Fast human post-move verification.
-
-    No normal-path 64-square scan. The candidate must explain the physical
-    source/destination transition on two fresh frames. If the screen is still
-    mid-transition, the function samples until the short deadline and then
-    returns failure so the existing recovery layers can take over rather than
-    committing an uncertain move.
-    """
+    """Fast human post-move verification with board-only captures."""
     if move is None or frame is None:
-        return False, frame, "missing human move/frame for fast verification"
+        return False, frame, "missing human move/frame"
+    baseline_board = _fast_board_view(frame, board_coords)
+    if baseline_board is None:
+        return False, frame, "missing board ROI"
 
-    baseline_frame = frame
-    start = time.perf_counter()
-    deadline = start + 0.20
+    deadline = time.perf_counter() + 0.12
     last_frame = frame
-
     while time.perf_counter() < deadline:
-        candidate_frame = capture_screen(sct, hwnd)
-        if candidate_frame is None:
-            time.sleep(BOT_RECOVERY_POLL)
+        candidate = capture_board_roi(sct, hwnd, board_coords)
+        if candidate is None:
             continue
-
-        last_frame = candidate_frame
         ok, reason = fast_expected_post_state_confirmed(
-            baseline_frame,
-            candidate_frame,
-            before_board,
-            move,
-            board_coords,
-            black_perspective
+            baseline_board, candidate, before_board, move, board_coords, black_perspective
         )
         if not ok:
-            time.sleep(BOT_RECOVERY_POLL)
             continue
 
-        # Do not trust one animation frame. Require the same physical state
-        # again on a fresh capture before returning the move to main().
         confirm_deadline = time.perf_counter() + FAST_POST_CONFIRM_TIMEOUT
         while time.perf_counter() < confirm_deadline:
-            time.sleep(FAST_POST_CONFIRM_GAP)
-            confirm_frame = capture_screen(sct, hwnd)
-            if confirm_frame is None:
+            confirm = capture_board_roi(sct, hwnd, board_coords)
+            if confirm is None:
                 continue
-
             confirm_ok, confirm_reason = fast_expected_post_state_confirmed(
-                baseline_frame,
-                confirm_frame,
-                before_board,
-                move,
-                board_coords,
-                black_perspective
+                baseline_board, confirm, before_board, move, board_coords, black_perspective
             )
             if confirm_ok:
-                expected_after = expected_board_after_move(
-                    before_board,
-                    move
-                )
-                # Lightweight logical sanity: the candidate itself MUST be
-                # legal in the exact pre-move board used for verification.
+                expected_after = expected_board_after_move(before_board, move)
                 if move not in before_board.legal_moves:
-                    return False, confirm_frame, "candidate no longer legal in pre-move board"
+                    return False, frame, "candidate no longer legal"
                 if expected_board is not None and expected_after.fen() != expected_board.fen():
-                    return False, confirm_frame, "candidate physical state does not match expected board"
-
-                return True, confirm_frame, (
-                    "double-frame fast physical verification PASS; "
-                    + confirm_reason
+                    return False, frame, "expected board mismatch"
+                return True, compose_verified_full_frame(frame, confirm, board_coords), (
+                    "double-frame fast physical verification PASS; " + confirm_reason
                 )
-
             break
 
     return False, last_frame, "fast human physical verification timeout"
@@ -5092,78 +4919,47 @@ def transition_confirmed(
 
 
 def verify_bot_move(
-    sct,
-    hwnd,
-    board,
-    move,
-    before_frame,
-    board_coords,
-    black_perspective
+    sct, hwnd, board, move, before_frame, board_coords, black_perspective
 ):
-    """Low-latency closed-loop bot verification.
-
-    Normal moves and captures are verified from the trusted pre-move frame
-    using a small motion map plus exact changed-square piece checks. The same
-    move must pass on two fresh frames, which blocks transient touch/animation
-    frames and wrong legal touches. Full-board reconstruction is reserved for
-    explicit recovery/desync paths.
-    """
+    """Fast bot post-move verification with board-only captures."""
     if before_frame is None or move is None:
         return False, None, "missing bot verification input"
+    baseline_board = _fast_board_view(before_frame, board_coords)
+    if baseline_board is None:
+        return False, None, "missing board ROI"
 
-    start = time.perf_counter()
-    deadline = start + BOT_VERIFY_TIMEOUT
-    last_frame = None
+    deadline = time.perf_counter() + BOT_VERIFY_TIMEOUT
     last_reason = "post-move state not yet confirmed"
-
     while time.perf_counter() < deadline:
-        after_frame = capture_screen(sct, hwnd)
-        if after_frame is None:
-            time.sleep(BOT_RECOVERY_POLL)
+        after = capture_board_roi(sct, hwnd, board_coords)
+        if after is None:
             continue
 
-        last_frame = after_frame
         ok, reason = fast_expected_post_state_confirmed(
-            before_frame,
-            after_frame,
-            board,
-            move,
-            board_coords,
-            black_perspective
+            baseline_board, after, board, move, board_coords, black_perspective
         )
         if not ok:
             last_reason = reason
-            time.sleep(BOT_RECOVERY_POLL)
             continue
 
-        # Require the same exact move to remain physically present on another
-        # fresh frame. This is the key protection against touch glitches and
-        # animation/intermediate frames.
         confirm_deadline = time.perf_counter() + FAST_POST_CONFIRM_TIMEOUT
         while time.perf_counter() < confirm_deadline:
-            time.sleep(FAST_POST_CONFIRM_GAP)
-            confirm_frame = capture_screen(sct, hwnd)
-            if confirm_frame is None:
+            confirm = capture_board_roi(sct, hwnd, board_coords)
+            if confirm is None:
                 continue
 
             confirm_ok, confirm_reason = fast_expected_post_state_confirmed(
-                before_frame,
-                confirm_frame,
-                board,
-                move,
-                board_coords,
-                black_perspective
+                baseline_board, confirm, board, move, board_coords, black_perspective
             )
             if confirm_ok:
-                return True, confirm_frame, (
-                    "double-frame fast bot verification PASS; "
-                    + confirm_reason
-                )
+                return True, compose_verified_full_frame(
+                    before_frame, confirm, board_coords
+                ), "double-frame fast bot verification PASS; " + confirm_reason
 
             last_reason = confirm_reason
             break
 
-    return False, last_frame, last_reason
+    return False, before_frame, last_reason
 
 
 def detect_board_orientation(
