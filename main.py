@@ -242,6 +242,47 @@ MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
 SW_RESTORE = 9
 
+# Use Win32 SendInput for scrcpy touch dispatch. Some scrcpy/Windows
+# combinations can ignore the older mouse_event() injection path.
+if os.name == "nt":
+    _ULONG_PTR = (
+        ctypes.c_ulonglong
+        if ctypes.sizeof(ctypes.c_void_p) == 8
+        else ctypes.c_ulong
+    )
+
+    class _MOUSEINPUT(ctypes.Structure):
+        _fields_ = [
+            ("dx", wintypes.LONG),
+            ("dy", wintypes.LONG),
+            ("mouseData", wintypes.DWORD),
+            ("dwFlags", wintypes.DWORD),
+            ("time", wintypes.DWORD),
+            ("dwExtraInfo", _ULONG_PTR),
+        ]
+
+    class _INPUT_UNION(ctypes.Union):
+        _fields_ = [
+            ("mi", _MOUSEINPUT),
+        ]
+
+    class _INPUT(ctypes.Structure):
+        _anonymous_ = ("u",)
+        _fields_ = [
+            ("type", wintypes.DWORD),
+            ("u", _INPUT_UNION),
+        ]
+
+    try:
+        user32.SendInput.argtypes = [
+            wintypes.UINT,
+            ctypes.POINTER(_INPUT),
+            ctypes.c_int,
+        ]
+        user32.SendInput.restype = wintypes.UINT
+    except Exception:
+        pass
+
 PIECE_MAP = {
     "white_king.png": "K",
     "white_queen.png": "Q",
@@ -503,10 +544,50 @@ def focus_scrcpy(hwnd):
     return False
 
 
-def left_click_screen(x, y):
-    # Direct Win32 dispatch. No artificial cursor/hold sleeps.
+def _sendinput_mouse_flag(flag):
+    if not user32 or os.name != "nt" or "_INPUT" not in globals():
+        return False
+
+    try:
+        inp = _INPUT()
+        inp.type = 0
+        inp.mi.dx = 0
+        inp.mi.dy = 0
+        inp.mi.mouseData = 0
+        inp.mi.dwFlags = int(flag)
+        inp.mi.time = 0
+        inp.mi.dwExtraInfo = 0
+
+        sent = user32.SendInput(
+            1,
+            ctypes.byref(inp),
+            ctypes.sizeof(_INPUT),
+        )
+        return int(sent) == 1
+    except Exception:
+        return False
+
+
+def left_click_screen(x, y, hold_seconds=0.020):
+    # Move first, then use SendInput for a real down/hold/up sequence.
+    # Fall back to mouse_event only when SendInput is unavailable.
     user32.SetCursorPos(int(x), int(y))
+    time.sleep(0.004)
+
+    if _sendinput_mouse_flag(MOUSEEVENTF_LEFTDOWN):
+        time.sleep(max(0.0, float(hold_seconds)))
+        if _sendinput_mouse_flag(MOUSEEVENTF_LEFTUP):
+            return True
+
+        # Never leave a synthetic button held if the release call failed.
+        try:
+            user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+        except Exception:
+            pass
+        return False
+
     user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+    time.sleep(max(0.0, float(hold_seconds)))
     user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
     return True
 
@@ -1652,18 +1733,14 @@ def click_move(
 
     print(f"[BOT CLICK] {move.uci()} source=({sx},{sy}) target=({tx},{ty})")
 
-    # Keep hover/input state away from the board before the next touch.
-    user32.SetCursorPos(0, 0)
-    time.sleep(0.005)
-
-    # Use a real press/hold/release sequence. A 6ms tap was too fragile
-    # through scrcpy on the current setup, so the source registration gets
-    # a small but deliberate hold. This still keeps the complete move fast.
-    user32.SetCursorPos(int(sx), int(sy))
-    time.sleep(0.005)
-    user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-    time.sleep(0.020)
-    user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+    # Use a real source press/hold/release through SendInput so scrcpy
+    # receives the same mouse event reliably as a physical click.
+    if not left_click_screen(sx, sy, hold_seconds=0.020):
+        print(
+            "[BOT CLICK] SOURCE INPUT DISPATCH FAILED | "
+            f"{move.uci()}"
+        )
+        return False
 
     if sct is not None and before_frame is not None:
         source_ok, source_reason = _verify_source_click_selected(
@@ -1683,11 +1760,12 @@ def click_move(
     # Give scrcpy/Android a small separation between source and destination.
     time.sleep(0.012)
 
-    user32.SetCursorPos(int(tx), int(ty))
-    time.sleep(0.005)
-    user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-    time.sleep(0.020)
-    user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+    if not left_click_screen(tx, ty, hold_seconds=0.020):
+        print(
+            "[BOT CLICK] TARGET INPUT DISPATCH FAILED | "
+            f"{move.uci()}"
+        )
+        return False
 
     if move.promotion is not None:
         if promotion_color is None:
