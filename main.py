@@ -8133,10 +8133,10 @@ def main():
 
                                 else:
                                     print(
-                                    "[ENGINE] "
-                                    f"depth={STOCKFISH_DEPTH} "
-                                    f"time={engine_elapsed:.3f}s "
-                                    f"MultiPV={len(multipv_result)}"
+                                        "[ENGINE] "
+                                        f"depth={STOCKFISH_DEPTH} "
+                                        f"time={engine_elapsed:.3f}s "
+                                        f"MultiPV={len(multipv_result)}"
                                     )
 
                                     print(
