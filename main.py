@@ -119,11 +119,11 @@ FULL_BOARD_EXPECTED_MATCH_THRESHOLD = 0.40
 # (such as the false K=0.125 seen on an empty e4) from blocking a legal move.
 EMPTY_DEST_MATCH_THRESHOLD = 0.10
 
-# Randomize pickup/drop points uniformly inside a centered circle
-# whose area is exactly 40% of the chess-square area.
-# Both source (piece pickup) and destination (piece drop) use this
-# same helper, so every move stays inside the same safe circular zone.
-CLICK_CIRCLE_AREA = 0.40
+# Keep pickup/drop points tightly around the square center. The previous
+# 40%-area circle allowed too much lateral movement on small/mobile pieces,
+# which caused occasional misses and unnecessary retries.
+# Both source and destination use the same center-biased safe zone.
+CLICK_CIRCLE_AREA = 0.08
 CLICK_CIRCLE_RADIUS_FRACTION = math.sqrt(CLICK_CIRCLE_AREA / math.pi)
 
 # After a random 5-8 Stockfish moves, add one random human-like pause.
@@ -1031,7 +1031,7 @@ def square_screen_center(
     angle = random.uniform(0.0, 2.0 * math.pi)
     radius = (
         CLICK_CIRCLE_RADIUS_FRACTION
-        * (random.uniform(0.0, 1.0) ** 1.35)
+        * (random.uniform(0.0, 1.0) ** 2.20)
     )
 
     rx = 0.5 + radius * math.cos(angle)
