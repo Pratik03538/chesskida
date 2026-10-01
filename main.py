@@ -4478,23 +4478,6 @@ def _fast_visual_score(visual_scores, square, black_perspective):
     return float(visual_scores[row, col])
 
 
-def fast_square_motion_scores(before_frame, after_frame, board_coords, black_perspective):
-    visual_scores = fast_board_motion_map(
-        before_frame,
-        after_frame,
-        board_coords
-    )
-    if visual_scores is None:
-        return None
-
-    scores = {}
-    for square in chess.SQUARES:
-        scores[square] = _fast_visual_score(
-            visual_scores,
-            square,
-            black_perspective
-        )
-    return scores
 
 def fast_square_motion_scores(before_frame, after_frame, board_coords, black_perspective):
     visual_scores = fast_board_motion_map(before_frame, after_frame, board_coords)
@@ -4550,8 +4533,14 @@ def _fast_expected_post_state_from_map(
             if old_piece is None:
                 continue
             old_symbol = old_piece.symbol()
+            # Only ask whether the piece that was actually on this square
+            # before the move is still present. Do not run the generic 12-piece
+            # classifier on an empty square; it can hallucinate N/Q/etc. from
+            # square texture or move highlights.
             detected, score = classify_square(
-                crop, templates, expected_symbol=old_symbol,
+                crop,
+                templates,
+                expected_symbol=old_symbol,
                 match_threshold=FAST_ABSENCE_MATCH_THRESHOLD
             )
             if detected == old_symbol:
@@ -5061,15 +5050,20 @@ def _fast_expected_sequence_state(
         expected_piece = working.piece_at(square)
 
         if expected_piece is None:
+            old_piece = board.piece_at(square)
+            if old_piece is None:
+                continue
+            old_symbol = old_piece.symbol()
             detected, score = classify_square(
                 crop,
                 templates,
-                match_threshold=EMPTY_DEST_MATCH_THRESHOLD
+                expected_symbol=old_symbol,
+                match_threshold=FAST_ABSENCE_MATCH_THRESHOLD
             )
-            if detected is not None:
+            if detected == old_symbol:
                 return False, (
-                    f"{chess.square_name(square)} occupied by "
-                    f"{detected} ({score:.3f}), expected empty"
+                    f"{chess.square_name(square)} still contains "
+                    f"{old_symbol} ({score:.3f})"
                 )
         else:
             expected_symbol = expected_piece.symbol()
@@ -5134,17 +5128,6 @@ def fast_pending_move_recovery(
         return None
 
     def candidate(scores, frame):
-        # Bot-only first, because it is the cheapest and exactest hypothesis.
-        ok, reason = _fast_expected_sequence_state(
-            frame,
-            board,
-            [pending_move],
-            board_coords,
-            black_perspective
-        )
-        if ok:
-            return pending_move, None, "BOT_ONLY", reason
-
         flat = np.asarray(scores).reshape(-1)
         order = np.argsort(flat)[::-1]
         top_squares = set()
@@ -5200,6 +5183,17 @@ def fast_pending_move_recovery(
             )
             if ok:
                 return pending_move, human_move, "BOT_PLUS_HUMAN", reason
+
+        # Only accept BOT_ONLY after we have failed to prove a legal human reply.
+        ok, reason = _fast_expected_sequence_state(
+            frame,
+            board,
+            [pending_move],
+            board_coords,
+            black_perspective
+        )
+        if ok:
+            return pending_move, None, "BOT_ONLY", reason
 
         return None
 
@@ -8511,28 +8505,41 @@ def main():
 
                                 if not pre_ok:
                                     # The board is not currently an exact legal pre-state.
-                                    # First check whether the already-clicked move actually landed.
-                                    post_already_ok, post_already_reason = (
-                                        screen_matches_expected_bot_move(
-                                            sct,
-                                            scrcpy_hwnd,
-                                            precheck_frame,
-                                            board,
-                                            best_move,
-                                            cached_board_coords,
-                                            visual_black_perspective,
-                                            before_frame
-                                        )
+                                    # First reconcile a landed bot move or bot+human sequence.
+                                    fast_recovery = fast_pending_move_recovery(
+                                        sct,
+                                        scrcpy_hwnd,
+                                        before_frame,
+                                        board,
+                                        best_move,
+                                        cached_board_coords,
+                                        visual_black_perspective,
+                                        current_frame=precheck_frame
                                     )
 
-                                    if post_already_ok:
+                                    if (
+                                        fast_recovery is not None
+                                        and fast_recovery.get("bot_move") == best_move
+                                        and fast_recovery.get("frame") is not None
+                                    ):
+                                        recovered_human = fast_recovery.get("human_move")
+                                        if recovered_human is not None:
+                                            pending_recovered_human = (
+                                                recovered_human,
+                                                fast_recovery["frame"]
+                                            )
+                                            print(
+                                                "[RECOVERY] FAST bot + human already on screen: "
+                                                f"{best_san} + {recovered_human.uci()}"
+                                            )
+                                        else:
+                                            print(
+                                                "[RECOVERY] FAST bot already on screen: "
+                                                f"{best_san}"
+                                            )
                                         verified = True
-                                        after_frame = precheck_frame
-                                        reason = post_already_reason
-                                        print(
-                                            "[VALIDATION] POST-STATE ALREADY PRESENT | "
-                                            f"{best_move.uci()} | committing after 2-frame exact confirmation"
-                                        )
+                                        after_frame = fast_recovery["frame"]
+                                        reason = fast_recovery["reason"]
                                     else:
                                         print(
                                             "[VALIDATION] WAITING | pending Stockfish move "
@@ -8577,12 +8584,6 @@ def main():
 
                                     if pending_entry is None:
                                         pending_entry = pending_bot_moves.get(position_key)
-
-                                    if pending_entry is not None:
-                                        pending_entry["clicked"] = True
-                                        pending_entry["attempts"] = (
-                                            int(pending_entry.get("attempts", 0)) + 1
-                                        )
 
                                     if pending_entry is None:
                                         pending_entry = pending_bot_moves.get(position_key)
@@ -8727,12 +8728,6 @@ def main():
                                             f"{retry_count}/"
                                             f"{BOT_CLICK_RETRIES}"
                                         )
-
-                                        if pending_entry is not None:
-                                            pending_entry["clicked"] = True
-                                            pending_entry["attempts"] = (
-                                                int(pending_entry.get("attempts", 0)) + 1
-                                            )
 
                                         if pending_entry is not None:
                                             pending_entry["clicked"] = True
