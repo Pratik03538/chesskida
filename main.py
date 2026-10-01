@@ -7635,6 +7635,7 @@ def main():
                     key == ord("f")
                     and cached_board_coords
                 ):
+                    armed_premove = None
                     clear_runtime_caches()
 
                     (
@@ -8852,6 +8853,28 @@ def main():
                                     next_main_turn_rescan = time.perf_counter() + TURN_RESCAN_INTERVAL
 
                                     stockfish_moves_since_buffer += 1
+
+                                    # Safe forced-reply premove: prepare it while the
+                                    # human is thinking, but execute it only after the
+                                    # real human move is physically verified and matches.
+                                    if (
+                                        ENABLE_CONDITIONAL_PREMOVE
+                                        and board.turn == human_color
+                                    ):
+                                        prepared_forced = prepare_forced_reply_premove(
+                                            engine,
+                                            board
+                                        )
+
+                                        if prepared_forced is not None:
+                                            prepared_forced["position_key"] = board.fen()
+                                            armed_premove = prepared_forced
+
+                                            print(
+                                                "[PREMOVE] Armed forced reply | "
+                                                f"human={prepared_forced['expected_human_san']} "
+                                                f"reply={prepared_forced['san']}"
+                                            )
 
                                     print(
                                         f"[VALIDATION] "
