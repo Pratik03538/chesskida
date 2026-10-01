@@ -9815,11 +9815,6 @@ def main():
                                     "internal position confirmed | continuing"
                                 )
 
-                    match_next_scan = (
-                        time.perf_counter()
-                        + MATCH_NEW_GAME_CHECK_INTERVAL
-                    )
-
                 status = "READY - PRESS R"
 
                 if (
