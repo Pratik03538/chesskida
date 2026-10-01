@@ -8834,6 +8834,24 @@ def main():
 
                                     engine_elapsed = 0.0
 
+                                    match_ui["preference"] = {
+                                        "best": (
+                                            best_info_move.uci()
+                                            if best_info_move is not None
+                                            else "-"
+                                        ),
+                                        "selected": best_move.uci(),
+                                        "rank": f"#{int(selection_meta.get('rank', 0)) + 1}",
+                                        "best_cp": selection_meta.get("current_cp"),
+                                        "selected_cp": selection_meta.get("selected_cp"),
+                                        "reason": str(
+                                            selection_meta.get(
+                                                "reason",
+                                                "pending retry"
+                                            )
+                                        ),
+                                    }
+
                                     print(
                                         "[STOCKFISH] "
                                         f"Retrying pending move: "
@@ -8903,6 +8921,28 @@ def main():
 
                                     if (
                                         best_move is None
+
+                                    match_ui["preference"] = {
+                                        "best": (
+                                            best_info_move.uci()
+                                            if best_info_move is not None
+                                            else "-"
+                                        ),
+                                        "selected": (
+                                            best_move.uci()
+                                            if best_move is not None
+                                            else "-"
+                                        ),
+                                        "rank": f"#{int(selection_meta.get('rank', 0)) + 1}",
+                                        "best_cp": selection_meta.get("current_cp"),
+                                        "selected_cp": selection_meta.get("selected_cp"),
+                                        "reason": str(
+                                            selection_meta.get(
+                                                "reason",
+                                                "-"
+                                            )
+                                        ),
+                                    }
                                         or best_move
                                         not in board.legal_moves
                                     ):
