@@ -304,373 +304,215 @@ def _match_rect_edge_score(edge_map, x, y, w, h):
 
 def match_button_candidates(frame):
     """
-    Locate the RESULT-SCREEN action row without assuming a fixed screen
-    position.
+    Detect the actual RESULT-SCREEN action row.
 
-    The result UI contains two sibling horizontal controls:
-        left  = Rematch
-        right = New / New <time-control>
+    On the current chess UI the Rematch/New controls are two large, equal
+    dark rounded rectangles in one horizontal row. The button fill is only
+    slightly brighter than the surrounding result background, so an
+    intensity-based mask is more reliable than generic edge contours.
 
-    We deliberately require a plausible LEFT+RIGHT pair. A lone rectangle
-    is not enough, because clicking a guessed rectangle is exactly what caused
-    the previous false clicks.
+    IMPORTANT:
+    A candidate is accepted only when it looks like the real two-button
+    action row. There is intentionally NO arbitrary screen-coordinate
+    fallback.
     """
     if frame is None:
         return []
 
     height, width = frame.shape[:2]
+
     if height < 120 or width < 240:
         return []
 
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-    # Two complementary edge maps. The first catches crisp outlines; the
-    # second recovers anti-aliased / low-contrast rounded buttons.
-    edge_maps = []
-
-    canny = cv2.Canny(
-        gray,
-        35,
-        110
+    gray = cv2.cvtColor(
+        frame,
+        cv2.COLOR_BGR2GRAY
     )
-    canny = cv2.morphologyEx(
-        canny,
-        cv2.MORPH_CLOSE,
-        np.ones((3, 5), np.uint8)
-    )
-    edge_maps.append(canny)
 
-    blur = cv2.GaussianBlur(
-        gray,
-        (5, 5),
-        0
-    )
-    low = cv2.Canny(
-        blur,
-        20,
-        75
-    )
-    low = cv2.morphologyEx(
-        low,
-        cv2.MORPH_CLOSE,
-        np.ones((3, 7), np.uint8)
-    )
-    edge_maps.append(low)
+    # The action row occupies the middle/lower result panel. This narrow
+    # region is deliberately chosen from the actual result-screen layout so
+    # player cards/text above cannot become click targets.
+    roi_top = int(height * 0.32)
+    roi_bottom = int(height * 0.49)
 
-    # Result controls can be anywhere in the lower/middle phone viewport.
-    # Do not hard-code the old 30%-50% band.
-    roi_top = int(height * 0.10)
-    roi_bottom = int(height * 0.92)
+    roi = gray[
+        roi_top:roi_bottom,
+        :
+    ]
 
-    all_rects = []
+    best = None
 
-    for edge_map in edge_maps:
-        roi = edge_map[
-            roi_top:roi_bottom,
-            :
-        ]
+    # The button surface is a dark gray that is slightly brighter than the
+    # surrounding nearly-black result background. Use several thresholds so
+    # anti-aliasing/device rendering does not break detection.
+    for low, high in (
+        (38, 85),
+        (40, 90),
+        (42, 100),
+        (44, 110),
+    ):
+        mask = cv2.inRange(
+            roi,
+            low,
+            high
+        )
+
+        mask = cv2.morphologyEx(
+            mask,
+            cv2.MORPH_CLOSE,
+            cv2.getStructuringElement(
+                cv2.MORPH_RECT,
+                (21, 21)
+            )
+        )
+
+        mask = cv2.morphologyEx(
+            mask,
+            cv2.MORPH_OPEN,
+            cv2.getStructuringElement(
+                cv2.MORPH_RECT,
+                (5, 5)
+            )
+        )
 
         contours, _ = cv2.findContours(
-            roi,
-            cv2.RETR_LIST,
+            mask,
+            cv2.RETR_EXTERNAL,
             cv2.CHAIN_APPROX_SIMPLE
         )
 
         for contour in contours:
-            bx, by, bw, bh = cv2.boundingRect(contour)
+            bx, by, bw, bh = cv2.boundingRect(
+                contour
+            )
             by += roi_top
 
-            if bw < max(90, int(width * 0.12)):
+            if bw < int(width * 0.70):
                 continue
-            if bw > int(width * 0.65):
-                continue
-            if bh < max(16, int(height * 0.022)):
-                continue
-            if bh > int(height * 0.18):
+            if bw > int(width * 0.99):
                 continue
 
-            aspect = bw / max(1.0, float(bh))
-
-            if aspect < 2.0 or aspect > 15.0:
+            if bh < int(height * 0.035):
                 continue
-
-            area_ratio = (
-                (bw * bh)
-                / float(max(1, width * height))
-            )
-
-            if area_ratio < 0.004:
+            if bh > int(height * 0.11):
                 continue
 
             center_y = by + bh * 0.5
 
             if (
-                center_y < height * 0.10
-                or center_y > height * 0.92
+                center_y < height * 0.35
+                or center_y > height * 0.46
             ):
                 continue
 
-            # Rectangle-like edge support. This rejects most player cards,
-            # board edges and long text contours before pair matching.
-            scores = [
-                _match_rect_edge_score(
-                    edge_map,
+            aspect = bw / max(
+                1.0,
+                float(bh)
+            )
+
+            if aspect < 6.0:
+                continue
+
+            # Prefer a nearly full-width paired action row.
+            coverage = bw / float(max(1, width))
+
+            candidate_score = (
+                coverage * 4.0
+                - abs(
+                    center_y / float(height) - 0.395
+                ) * 2.0
+                + min(
+                    1.0,
+                    aspect / 12.0
+                )
+            )
+
+            if (
+                best is None
+                or candidate_score > best[0]
+            ):
+                best = (
+                    candidate_score,
                     bx,
                     by,
                     bw,
                     bh
                 )
-            ]
 
-            rect_score = max(scores)
-
-            if rect_score < 0.025:
-                continue
-
-            all_rects.append(
-                {
-                    "cx": bx + bw * 0.5,
-                    "cy": by + bh * 0.5,
-                    "x": bx,
-                    "y": by,
-                    "w": bw,
-                    "h": bh,
-                    "edge": rect_score,
-                }
-            )
-
-    if not all_rects:
+    if best is None:
         return []
 
-    # Remove near-duplicates produced by the two edge maps / nested contours.
-    all_rects.sort(
-        key=lambda r: (
-            -r["edge"],
-            -r["w"] * r["h"]
-        )
+    _, bx, by, bw, bh = best
+
+    # The UI leaves a small central gap between the two buttons. Split the
+    # detected action-row surface around that gap instead of guessing a
+    # desktop coordinate.
+    gap = max(
+        8,
+        int(width * 0.018)
     )
 
-    rects = []
-
-    for candidate in all_rects:
-        duplicate = False
-
-        for existing in rects:
-            if (
-                abs(candidate["cx"] - existing["cx"])
-                <= max(18, width * 0.018)
-                and
-                abs(candidate["cy"] - existing["cy"])
-                <= max(14, height * 0.018)
-                and
-                abs(candidate["w"] - existing["w"])
-                <= max(35, width * 0.035)
-                and
-                abs(candidate["h"] - existing["h"])
-                <= max(20, height * 0.020)
-            ):
-                duplicate = True
-                break
-
-        if not duplicate:
-            rects.append(candidate)
-
-    if len(rects) < 2:
-        return []
-
-    # Build plausible sibling pairs. The correct Rematch/New controls are
-    # close horizontally, same row, and very similar in height.
-    pairs = []
-
-    for left_index in range(len(rects)):
-        left = rects[left_index]
-
-        for right_index in range(left_index + 1, len(rects)):
-            right = rects[right_index]
-
-            if left["cx"] > right["cx"]:
-                left, right = right, left
-
-            center_y_gap = abs(
-                left["cy"] - right["cy"]
-            )
-
-            if center_y_gap > max(
-                30,
-                height * 0.085
-            ):
-                continue
-
-            height_ratio = (
-                min(left["h"], right["h"])
-                / max(left["h"], right["h"])
-            )
-
-            if height_ratio < 0.55:
-                continue
-
-            width_ratio = (
-                min(left["w"], right["w"])
-                / max(left["w"], right["w"])
-            )
-
-            if width_ratio < 0.45:
-                continue
-
-            gap = (
-                right["x"]
-                - (left["x"] + left["w"])
-            )
-
-            if gap < -max(
-                12,
-                int(width * 0.015)
-            ):
-                continue
-
-            if gap > max(
-                220,
-                int(width * 0.15)
-            ):
-                continue
-
-            group_width = (
-                right["x"] + right["w"] - left["x"]
-            )
-
-            # Avoid pairing two unrelated controls spread across the full
-            # phone width.
-            if group_width > int(width * 0.95):
-                continue
-
-            # Result buttons are normally on the same horizontal action row.
-            pair_y = (
-                left["cy"] + right["cy"]
-            ) * 0.5
-
-            # Prefer the middle/lower portion, but do not require it.
-            y_preference = 1.0 - min(
-                1.0,
-                abs(
-                    pair_y - height * 0.62
-                ) / max(1.0, height * 0.45)
-            )
-
-            center_preference = 1.0 - min(
-                1.0,
-                abs(
-                    (
-                        (left["cx"] + right["cx"]) * 0.5
-                    ) - width * 0.5
-                )
-                / max(1.0, width * 0.50)
-            )
-
-            score = (
-                left["edge"]
-                + right["edge"]
-                + height_ratio * 0.50
-                + width_ratio * 0.35
-                + y_preference * 0.35
-                + center_preference * 0.25
-            )
-
-            pairs.append(
-                (
-                    score,
-                    left,
-                    right
-                )
-            )
-
-    # Some UIs render both buttons as one giant outline. Try one controlled
-    # split only when the rectangle is unusually wide and sits in a plausible
-    # action row. This remains safer than arbitrary fixed coordinates.
-    if not pairs:
-        for rect in rects:
-            if rect["w"] < int(width * 0.52):
-                continue
-            if rect["h"] > int(height * 0.16):
-                continue
-            if rect["w"] / max(1.0, rect["h"]) < 5.0:
-                continue
-
-            gap = max(
-                8,
-                int(rect["w"] * 0.025)
-            )
-            half_w = int(
-                (rect["w"] - gap)
-                / 2
-            )
-
-            if half_w < int(width * 0.12):
-                continue
-
-            left = {
-                "cx": rect["x"] + half_w * 0.5,
-                "cy": rect["cy"],
-                "x": rect["x"],
-                "y": rect["y"],
-                "w": half_w,
-                "h": rect["h"],
-                "edge": rect["edge"] * 0.75,
-            }
-
-            right_x = (
-                rect["x"]
-                + half_w
-                + gap
-            )
-
-            right = {
-                "cx": right_x + half_w * 0.5,
-                "cy": rect["cy"],
-                "x": right_x,
-                "y": rect["y"],
-                "w": half_w,
-                "h": rect["h"],
-                "edge": rect["edge"] * 0.75,
-            }
-
-            pairs.append(
-                (
-                    rect["edge"] * 1.40,
-                    left,
-                    right
-                )
-            )
-
-    if not pairs:
-        return []
-
-    pairs.sort(
-        key=lambda item: (
-            -item[0],
-            item[1]["cy"],
-            item[1]["cx"]
-        )
+    half_w = int(
+        (bw - gap) / 2
     )
 
-    _, left, right = pairs[0]
+    if half_w < int(width * 0.28):
+        return []
+
+    left_x = int(bx)
+    right_x = int(
+        bx + half_w + gap
+    )
+
+    # Keep both halves inside the detected row.
+    right_end = right_x + half_w
+    detected_end = bx + bw
+
+    if right_end > detected_end:
+        half_w = detected_end - right_x
+
+    if half_w < int(width * 0.25):
+        return []
+
+    center_y = by + bh * 0.5
+
+    left = (
+        int(left_x + half_w * 0.5),
+        int(round(center_y)),
+        int(half_w),
+        int(bh)
+    )
+
+    right = (
+        int(right_x + half_w * 0.5),
+        int(round(center_y)),
+        int(half_w),
+        int(bh)
+    )
+
+    print(
+        "[MATCH] Result action row located | "
+        f"REMATCH=({left[0]},{left[1]}) "
+        f"NEW=({right[0]},{right[1]}) "
+        f"row=({bx},{by},{bw},{bh})"
+    )
 
     return [
         (
-            int(round(left["cx"])),
-            int(round(left["cy"])),
-            int(left["w"]),
-            int(left["h"]),
-            float(left["edge"])
+            left[0],
+            left[1],
+            left[2],
+            left[3],
+            1.0
         ),
         (
-            int(round(right["cx"])),
-            int(round(right["cy"])),
-            int(right["w"]),
-            int(right["h"]),
-            float(right["edge"])
+            right[0],
+            right[1],
+            right[2],
+            right[3],
+            1.0
         )
     ]
-
 
 def match_action_points(frame, action):
     candidates = match_button_candidates(frame)
