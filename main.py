@@ -2073,11 +2073,6 @@ def detect_new_game_state(
             f"confirm exact={confirm_exact}/64 "
             f"pieces={confirm_piece_count}/32"
         )
-    else:
-        second_reason = (
-            f"confirm exact={confirm_exact}/64 "
-            f"pieces={confirm_piece_count}/32"
-        )
 
     turn_ok, turn_reason = validate_new_game_turn_state(
         candidate_board,
@@ -2096,7 +2091,7 @@ def detect_new_game_state(
         )
         return None
 
-        return {
+    return {
         "frame": confirm_frame,
         "grid": confirm_grid,
         "scan_ms": scan_ms,
