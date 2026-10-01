@@ -8118,26 +8118,26 @@ def main():
                                 pending_bot_moves[
                                     position_key
                                 ] = {
-                                        "uci": best_move.uci(),
-                                        "san": best_san,
-                                        "result": result,
-                                        "best_info_move": best_info_move,
-                                        "selection_meta": selection_meta,
-                                    }
+                                    "uci": best_move.uci(),
+                                    "san": best_san,
+                                    "result": result,
+                                    "best_info_move": best_info_move,
+                                    "selection_meta": selection_meta,
+                                }
 
-                                    if selection_meta.get("source") == "GM_BOOK":
-                                        print(
-                                            "[BOOK] Book move frozen; "
-                                            "existing click/verification path retained."
-                                        )
+                                if selection_meta.get("source") == "GM_BOOK":
+                                    print(
+                                        "[BOOK] Book move frozen; "
+                                        "existing click/verification path retained."
+                                    )
 
-                                    else:
-                                        print(
-                                            "[ENGINE] "
-                                            f"depth={STOCKFISH_DEPTH} "
-                                            f"time={engine_elapsed:.3f}s "
-                                            f"MultiPV={len(multipv_result)}"
-                                        )
+                                else:
+                                    print(
+                                        "[ENGINE] "
+                                        f"depth={STOCKFISH_DEPTH} "
+                                        f"time={engine_elapsed:.3f}s "
+                                        f"MultiPV={len(multipv_result)}"
+                                    )
 
                                         print(
                                             "[TRAINING] "
