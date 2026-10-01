@@ -1011,6 +1011,8 @@ MATCH_NEW_GAME_RESET_CHANGE_MIN = 0.050
 
 MATCH_NEW_GAME_CHECK_INTERVAL = 0.10
 MATCH_NEW_GAME_MIN_EXACT = 58
+MATCH_NEW_GAME_MIN_DETECTED_PIECES = 24
+MATCH_NEW_GAME_MAX_DETECTED_PIECES = 40
 MATCH_NEW_GAME_CONFIRM_DELAY = 0.0
 
 
@@ -1080,6 +1082,31 @@ def _new_game_screen_exact_count(
     return exact
 
 
+def _new_game_detected_piece_count(
+    grid,
+    confidence,
+    black_perspective
+):
+    """Count confidently classified occupied squares.
+
+    A blank/non-board UI can produce a handful of false template matches.
+    A real chess starting position has 32 occupied squares, including after
+    White's first move. This count is therefore used as a board-presence gate
+    before accepting START / START+WHITE-MOVE.
+    """
+    observed = grid_conf_dict(
+        grid,
+        confidence,
+        black_perspective
+    )
+
+    return sum(
+        1
+        for symbol, _ in observed.values()
+        if symbol is not None
+    )
+
+
 def detect_new_game_state(
     sct,
     hwnd,
@@ -1109,6 +1136,18 @@ def detect_new_game_state(
     if grid is None:
         return None
 
+    detected_piece_count = _new_game_detected_piece_count(
+        grid,
+        confidence,
+        False
+    )
+
+    if (
+        detected_piece_count < MATCH_NEW_GAME_MIN_DETECTED_PIECES
+        or detected_piece_count > MATCH_NEW_GAME_MAX_DETECTED_PIECES
+    ):
+        return None
+
     start_board = chess.Board(
         INITIAL_FEN
     )
@@ -1117,6 +1156,18 @@ def detect_new_game_state(
         grid,
         start_board
     )
+
+    detected_piece_count = _new_game_detected_piece_count(
+        grid,
+        confidence,
+        perspective
+    )
+
+    if (
+        detected_piece_count < MATCH_NEW_GAME_MIN_DETECTED_PIECES
+        or detected_piece_count > MATCH_NEW_GAME_MAX_DETECTED_PIECES
+    ):
+        return None
 
     stockfish_color_now = detect_bottom_stockfish_color(
         perspective
@@ -1182,15 +1233,15 @@ def detect_new_game_state(
     if exact < MATCH_NEW_GAME_MIN_EXACT:
         return None
 
-    first_ok, first_reason = full_board_state_confirmed(
-        frame,
-        candidate_board,
-        board_coords,
-        perspective
-    )
-
-    if not first_ok:
+    # Candidate position must explain the board strongly enough on the
+    # same frame; generic UI screens are rejected by the piece-count gate.
+    if exact < MATCH_NEW_GAME_MIN_EXACT:
         return None
+
+    first_reason = (
+        f"new-game candidate exact={exact}/64 "
+        f"pieces={detected_piece_count}/32"
+    )
 
     time.sleep(
         MATCH_NEW_GAME_CONFIRM_DELAY
@@ -1204,15 +1255,38 @@ def detect_new_game_state(
     if confirm_frame is None:
         return None
 
-    second_ok, second_reason = full_board_state_confirmed(
+    confirm_grid, confirm_confidence, _ = scan_board(
         confirm_frame,
-        candidate_board,
-        board_coords,
+        board_coords
+    )
+
+    if confirm_grid is None:
+        return None
+
+    confirm_piece_count = _new_game_detected_piece_count(
+        confirm_grid,
+        confirm_confidence,
         perspective
     )
 
-    if not second_ok:
+    confirm_exact = _new_game_screen_exact_count(
+        confirm_grid,
+        confirm_confidence,
+        candidate_board,
+        perspective
+    )
+
+    if (
+        confirm_piece_count < MATCH_NEW_GAME_MIN_DETECTED_PIECES
+        or confirm_piece_count > MATCH_NEW_GAME_MAX_DETECTED_PIECES
+        or confirm_exact < MATCH_NEW_GAME_MIN_EXACT
+    ):
         return None
+
+    second_reason = (
+        f"confirm exact={confirm_exact}/64 "
+        f"pieces={confirm_piece_count}/32"
+    )
 
     return {
         "frame": confirm_frame,
@@ -10996,7 +11070,8 @@ def main():
                     ) = stable_initial_scan(
                         sct,
                         scrcpy_hwnd,
-                        cached_board_coords
+                        cached_board_coords,
+                        timeout=0.25
                     )
 
                     if (
