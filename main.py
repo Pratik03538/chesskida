@@ -11365,6 +11365,22 @@ def main():
 
                     result_signal = result_action_ui_visible
 
+                    if (
+                        screen_change >= MATCH_RESULT_CHANGE_THRESHOLD
+                        and not result_signal
+                        and match_ui.get("phase") in ("GAME", "AWAIT_RESULT")
+                    ):
+                        progress(
+                            "MATCH",
+                            (
+                                "screen changed but Rematch/New buttons are absent | "
+                                "preserving current game"
+                            ),
+                            key="non_result_screen_change",
+                            interval=0.75,
+                            force=True
+                        )
+
                     if result_signal:
                         match_result_streak += 1
                     else:
