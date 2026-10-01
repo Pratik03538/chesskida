@@ -527,6 +527,40 @@ def match_button_candidates(frame):
         )
     ]
 
+def result_action_buttons_present(frame):
+    """
+    A RESULT SCREEN is valid only when BOTH actual action buttons are visible.
+
+    Screen movement, notifications, calls, banners, keyboard popups, etc. are
+    never sufficient on their own. This helper deliberately checks the two
+    known button footprints from the supplied result-page screenshot.
+    """
+    if frame is None:
+        return False
+
+    candidates = match_button_candidates(frame)
+
+    if len(candidates) < 2:
+        return False
+
+    rematch_score = _match_action_visual_score(
+        frame,
+        MATCH_REMATCH_CENTER_X,
+        MATCH_ACTION_CENTER_Y
+    )
+
+    new_score = _match_action_visual_score(
+        frame,
+        MATCH_NEW_CENTER_X,
+        MATCH_ACTION_CENTER_Y
+    )
+
+    return (
+        rematch_score >= MATCH_ACTION_DARK_FRACTION_MIN
+        and new_score >= MATCH_ACTION_DARK_FRACTION_MIN
+    )
+
+
 def _match_action_visual_score(
     frame,
     center_x_norm,
@@ -683,7 +717,9 @@ def perform_match_action(sct, hwnd, action):
             action
         )
 
-        for px, py in points:
+        for point in points:
+            px = int(point[0])
+            py = int(point[1])
             client_x = 0
             client_y = 0
             client_w = frame_before.shape[1]
@@ -9875,13 +9911,15 @@ def main():
                 ):
                     obstruction = 0.0
 
-                    # In a live game, the board itself changes on every move.
-                    # Do not interpret normal move/animation motion as a hidden
-                    # screen. The active game is governed by chess move
-                    # detection; result screens are handled separately below.
+                    # In a live game, normal chess movement should remain
+                    # allowed. The obstruction ratio is still useful because a
+                    # phone notification/call/banner can cover a large part of
+                    # the board. Such an overlay pauses move processing only;
+                    # it never changes the chess game into RESULT.
                     if (
-                        match_ui.get("phase") == "MATCHMAKING"
-                        and baseline_frame is not None
+                        baseline_frame is not None
+                        and match_ui.get("phase")
+                        in ("GAME", "AWAIT_RESULT", "MATCHMAKING")
                     ):
                         obstruction = match_board_obstruction_ratio(
                             baseline_frame,
@@ -10060,24 +10098,28 @@ def main():
                                     f"{first_move.uci()} {san} | synced"
                                 )
 
-                        elif large_hidden and matchmaking_phase:
-                            match_ui["screen_guard"] = True
-                            game_ready = False
+                        elif (
+                            large_hidden
+                            and match_ui.get("phase") in ("GAME", "MATCHMAKING")
+                            and not bot_thinking
+                            and not board.is_game_over()
+                        ):
+                            # Temporary external screen obstruction:
+                            # preserve the current board/phase and simply pause
+                            # move processing until the board is visible again.
+                            if not match_ui.get("screen_guard"):
+                                print(
+                                    "[SCREEN GUARD] PAUSED | "
+                                    f"external overlay/obstruction={obstruction * 100:.1f}% | "
+                                    "preserving current game"
+                                )
 
-                            progress(
-                                "STATE",
-                                (
-                                    "PAUSED - SCREEN HIDDEN | "
-                                    f"{obstruction * 100:.1f}% BOARD HIDDEN | "
-                                    "checking for NEW MATCH"
-                                ),
-                                key="screen_guard",
-                                force=True
-                            )
+                            match_ui["screen_guard"] = True
 
                         elif (
                             match_ui.get("screen_guard")
-                            and matchmaking_phase
+                            and match_ui.get("phase") in ("GAME", "MATCHMAKING")
+                            and not large_hidden
                         ):
                             visible_ok, _ = full_board_state_confirmed(
                                 frame,
@@ -10141,6 +10183,7 @@ def main():
                     game_ready
                     and grid_locked
                     and stockfish_color is not None
+                    and not match_ui.get("screen_guard")
                 ):
                     if (
                         board.turn == human_color
@@ -11301,18 +11344,26 @@ def main():
                     result_action_ui_visible = False
                     result_signal = False
 
-                    if screen_change >= MATCH_RESULT_CHANGE_THRESHOLD:
-                        if obstruction < MATCH_BOARD_VISIBILITY_THRESHOLD:
-                            result_signal = True
-                        elif board.is_game_over():
-                            result_signal = True
-                        else:
-                            # Only inspect result controls when a large board
-                            # transition already suggests the screen changed.
-                            result_action_ui_visible = bool(
-                                match_button_candidates(frame)
-                            )
-                            result_signal = result_action_ui_visible
+                    # A changed screen is NOT a result screen. A notification,
+                    # phone call, banner, keyboard, app switch, or any other
+                    # overlay can create a large global pixel change.
+                    #
+                    # The only positive result signal is the real pair of
+                    # Rematch + New buttons. This is also checked while the
+                    # engine says GAME OVER, and during AWAIT_RESULT while the
+                    # result page is still appearing.
+                    should_check_result_buttons = (
+                        match_ui.get("phase") == "AWAIT_RESULT"
+                        or screen_change >= MATCH_RESULT_CHANGE_THRESHOLD
+                        or board.is_game_over()
+                    )
+
+                    if should_check_result_buttons:
+                        result_action_ui_visible = (
+                            result_action_buttons_present(frame)
+                        )
+
+                    result_signal = result_action_ui_visible
 
                     if result_signal:
                         match_result_streak += 1
