@@ -1817,26 +1817,61 @@ def detect_new_game_state(
     # Re-check for White's first move after confirmation. This handles the
     # race where the fresh board is detected at START, but White has already
     # moved before the state machine reaches its turn-processing block.
-    candidate_board, detected_first_move = (
-        refresh_white_first_move_after_new_game(
-            sct,
-            hwnd,
-            candidate_board,
-            stockfish_color_now,
-            human_color_now,
-            board_coords,
-            perspective,
-            first_move
-        )
+    (
+        candidate_board,
+        detected_first_move,
+        first_move_frame,
+        first_move_grid
+    ) = refresh_white_first_move_after_new_game(
+        sct,
+        hwnd,
+        candidate_board,
+        stockfish_color_now,
+        human_color_now,
+        board_coords,
+        perspective,
+        first_move
     )
 
     if detected_first_move is not None:
         first_move = detected_first_move
         kind = 1
+
+        if first_move_frame is not None:
+            confirm_frame = first_move_frame
+
+        if first_move_grid is not None:
+            confirm_grid = first_move_grid
+
+        # Re-verify the final synchronized first-move position against the
+        # physical frame that will become baseline_frame.
+        final_ok, final_reason = full_board_state_confirmed(
+            confirm_frame,
+            candidate_board,
+            board_coords,
+            perspective
+        )
+
+        if not final_ok:
+            progress(
+                "MATCH",
+                f"WHITE first move lost during final sync | {final_reason}",
+                key="new_match_first_move_final_reject",
+                interval=0.50,
+                force=True
+            )
+            return None
+
+        confirm_exact = 64
+
+        second_reason = (
+            "confirm synchronized WHITE first move position exact=64/64 "
+            f"pieces={confirm_piece_count}/32"
+        )
+    else:
         second_reason = (
             f"confirm exact={confirm_exact}/64 "
-            f"pieces={confirm_piece_count}/32 "
-            "| WHITE first move present"
+            f"pieces={confirm_piece_count}/32"
         )
     else:
         second_reason = (
@@ -7188,9 +7223,10 @@ def refresh_white_first_move_after_new_game(
     After the fresh board is accepted, give White one immediate verification
     pass before deciding to wait.
 
-    This is important when Human=WHITE: a real e2e4/d2d4/... may already have
-    happened between the first detection frame and the state transition. Do
-    not leave the bot waiting on a stale START position.
+    Returns:
+        (board, first_move, frame, grid)
+    so the physical baseline is kept synchronized with the logical board when
+    White has already made the first move.
     """
     if (
         human_color_now != chess.WHITE
@@ -7199,7 +7235,7 @@ def refresh_white_first_move_after_new_game(
         or board.move_stack
         or board.turn != chess.WHITE
     ):
-        return board, first_move
+        return board, first_move, None, None
 
     probe_frame = capture_screen(
         sct,
@@ -7207,7 +7243,7 @@ def refresh_white_first_move_after_new_game(
     )
 
     if probe_frame is None:
-        return board, first_move
+        return board, first_move, None, None
 
     detected_first = detect_existing_white_first_move(
         probe_frame,
@@ -7217,7 +7253,7 @@ def refresh_white_first_move_after_new_game(
     )
 
     if detected_first is None:
-        return board, first_move
+        return board, first_move, None, None
 
     expected_board = expected_board_after_move(
         board,
@@ -7240,7 +7276,12 @@ def refresh_white_first_move_after_new_game(
             "[MATCH] WHITE FIRST-MOVE PROBE REJECTED | "
             f"{detected_first.uci()} | {reason}"
         )
-        return board, first_move
+        return board, first_move, None, None
+
+    probe_grid, _, _ = scan_board(
+        probe_frame,
+        board_coords
+    )
 
     try:
         san = board.san(
@@ -7257,7 +7298,13 @@ def refresh_white_first_move_after_new_game(
         "fresh-game first-move probe confirmed"
     )
 
-    return board, detected_first
+    return (
+        board,
+        detected_first,
+        probe_frame,
+        probe_grid
+    )
+
 
 
 def validate_new_game_turn_state(
@@ -10380,6 +10427,14 @@ def main():
                             )
 
                             print(
+                                "[MATCH] BOARD SIDE SETUP | "
+                                f"bottom={'BLACK' if stockfish_color == chess.BLACK else 'WHITE'} "
+                                f"| Stockfish={'WHITE' if stockfish_color == chess.WHITE else 'BLACK'} "
+                                f"| Human={'WHITE' if human_color == chess.WHITE else 'BLACK'} "
+                                f"| turn={'WHITE' if board.turn == chess.WHITE else 'BLACK'}"
+                            )
+
+                            print(
                                 "[MATCH] FIRST-TURN DECISION | "
                                 f"{'HUMAN' if board.turn == human_color else 'STOCKFISH'} "
                                 "TO MOVE"
@@ -11935,6 +11990,14 @@ def main():
                                 f"{'WHITE' if stockfish_color == chess.WHITE else 'BLACK'} "
                                 f"| Human="
                                 f"{'WHITE' if human_color == chess.WHITE else 'BLACK'}"
+                            )
+
+                            print(
+                                "[MATCH] BOARD SIDE SETUP | "
+                                f"bottom={'BLACK' if stockfish_color == chess.BLACK else 'WHITE'} "
+                                f"| Stockfish={'WHITE' if stockfish_color == chess.WHITE else 'BLACK'} "
+                                f"| Human={'WHITE' if human_color == chess.WHITE else 'BLACK'} "
+                                f"| turn={'WHITE' if board.turn == chess.WHITE else 'BLACK'}"
                             )
 
                             print(
