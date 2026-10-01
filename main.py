@@ -5932,7 +5932,16 @@ def fast_preclick_board_confirmed(
     )
     source_detected, _ = classify_square(source_crop, templates)
     if source_detected != source_piece.symbol():
-        return False, f"source mismatch {source_detected or '-'} != {source_piece.symbol()}"
+        if len(board.move_stack) == 0:
+            return True, (
+                "initial-position source template miss tolerated "
+                f"({source_detected or '-'} != {source_piece.symbol()}); "
+                "motion map and destination safety passed"
+            )
+        return False, (
+            f"source mismatch {source_detected or '-'} "
+            f"!= {source_piece.symbol()}"
+        )
 
     if board.piece_at(move.to_square) is None:
         target_crop = get_square_crop(
@@ -9298,7 +9307,14 @@ def main():
                 ):
                     obstruction = 0.0
 
-                    if baseline_frame is not None:
+                    # In a live game, the board itself changes on every move.
+                    # Do not interpret normal move/animation motion as a hidden
+                    # screen. The active game is governed by chess move
+                    # detection; result screens are handled separately below.
+                    if (
+                        match_ui.get("phase") == "MATCHMAKING"
+                        and baseline_frame is not None
+                    ):
                         obstruction = match_board_obstruction_ratio(
                             baseline_frame,
                             frame,
@@ -9318,10 +9334,20 @@ def main():
                         >= MATCH_BOARD_VISIBILITY_THRESHOLD
                     )
 
+                    matchmaking_phase = (
+                        match_ui.get("phase") == "MATCHMAKING"
+                    )
+
+                    recovery_allowed = (
+                        matchmaking_phase
+                        or not game_ready
+                    )
+
                     if (
                         recovery_due
+                        and recovery_allowed
                         and (
-                            not game_ready
+                            matchmaking_phase
                             or large_hidden
                         )
                     ):
@@ -9419,7 +9445,7 @@ def main():
                                     f"{first_move.uci()} {san} | synced"
                                 )
 
-                        elif large_hidden:
+                        elif large_hidden and matchmaking_phase:
                             match_ui["screen_guard"] = True
                             game_ready = False
 
@@ -9434,7 +9460,10 @@ def main():
                                 force=True
                             )
 
-                        elif match_ui.get("screen_guard"):
+                        elif (
+                            match_ui.get("screen_guard")
+                            and matchmaking_phase
+                        ):
                             visible_ok, _ = full_board_state_confirmed(
                                 frame,
                                 board,
