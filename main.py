@@ -126,6 +126,9 @@ EMPTY_DEST_MATCH_THRESHOLD = 0.10
 CLICK_CIRCLE_AREA = 0.08
 CLICK_CIRCLE_RADIUS_FRACTION = math.sqrt(CLICK_CIRCLE_AREA / math.pi)
 
+# TEST BRANCH: safe conditional premoves. They are never clicked blindly.
+ENABLE_CONDITIONAL_PREMOVE = True
+
 # After a random 5-8 Stockfish moves, add one random human-like pause.
 RANDOM_BUFFER_MOVE_MIN = 5
 RANDOM_BUFFER_MOVE_MAX = 8
@@ -1644,6 +1647,87 @@ def click_move(
         return promotion_ok
 
     return True
+
+def safe_conditional_recapture(board, human_move):
+    """Return a recapture only when exactly one legal recapture exists."""
+    if not ENABLE_CONDITIONAL_PREMOVE:
+        return None
+    if not board.is_capture(human_move):
+        return None
+
+    target_square = human_move.to_square
+
+    if board.piece_at(target_square) is None:
+        return None
+
+    recaptures = [
+        candidate
+        for candidate in board.legal_moves
+        if candidate.to_square == target_square
+        and board.is_capture(candidate)
+    ]
+
+    if len(recaptures) != 1:
+        return None
+
+    return recaptures[0]
+
+
+def prepare_forced_reply_premove(engine, board):
+    """Precompute one reply only when the opponent has exactly one legal move."""
+    if not ENABLE_CONDITIONAL_PREMOVE:
+        return None
+
+    human_moves = list(board.legal_moves)
+
+    if len(human_moves) != 1:
+        return None
+
+    forced_human_move = human_moves[0]
+    reply_board = board.copy(stack=False)
+
+    try:
+        forced_human_san = reply_board.san(forced_human_move)
+        reply_board.push(forced_human_move)
+
+        info = engine.analyse(
+            reply_board,
+            chess.engine.Limit(
+                depth=STOCKFISH_DEPTH,
+                time=STOCKFISH_TIME
+            ),
+            multipv=1
+        )
+
+        if isinstance(info, list):
+            info = info[0] if info else None
+
+        if not isinstance(info, dict):
+            return None
+
+        pv = info.get("pv", [])
+
+        if not pv:
+            return None
+
+        reply_move = pv[0]
+
+        if reply_move not in reply_board.legal_moves:
+            return None
+
+        return {
+            "expected_human_uci": forced_human_move.uci(),
+            "expected_human_san": forced_human_san,
+            "uci": reply_move.uci(),
+            "san": reply_board.san(reply_move),
+            "kind": "FORCED_REPLY",
+            "result": info,
+        }
+
+    except Exception as exc:
+        print(f"[PREMOVE] Preparation skipped: {exc}")
+        return None
+
 
 def expected_changed_squares(
     board,
@@ -7224,6 +7308,7 @@ def main():
     last_bot_position_key = None
     pending_bot_moves = {}
     pending_recovered_human = None
+    armed_premove = None
     next_main_turn_rescan = time.perf_counter() + TURN_RESCAN_INTERVAL
     visual_black_perspective = False
     stockfish_color = None
@@ -7313,6 +7398,7 @@ def main():
 
                     next_human_best_uci = None
                     opponent_pressure = False
+                    armed_premove = None
                     _advantage_progress_target_cp = None
                     _advantage_progress_hold_moves = 0
                     _advantage_progress_hold_limit = random.randint(
@@ -7881,9 +7967,62 @@ def main():
 
                             next_human_best_uci = None
 
+                            prepared_premove = armed_premove
+                            armed_premove = None
+
                             board.push(
                                 move
                             )
+
+                            if prepared_premove is not None:
+                                if prepared_premove.get("expected_human_uci") == move.uci():
+                                    prepared_move = chess.Move.from_uci(
+                                        prepared_premove["uci"]
+                                    )
+
+                                    if prepared_move in board.legal_moves:
+                                        armed_premove = {
+                                            **prepared_premove,
+                                            "position_key": board.fen()
+                                        }
+
+                                        print(
+                                            "[PREMOVE] Armed forced reply | "
+                                            f"human={prepared_premove['expected_human_san']} "
+                                            f"reply={prepared_premove['san']}"
+                                        )
+                                    else:
+                                        print(
+                                            "[PREMOVE] Discarded forced reply | "
+                                            "reply is no longer legal"
+                                        )
+                                else:
+                                    print(
+                                        "[PREMOVE] Discarded forced reply | "
+                                        "human move changed"
+                                    )
+
+                            if armed_premove is None:
+                                recapture = safe_conditional_recapture(
+                                    board,
+                                    move
+                                )
+
+                                if recapture is not None:
+                                    armed_premove = {
+                                        "position_key": board.fen(),
+                                        "expected_human_uci": move.uci(),
+                                        "expected_human_san": san,
+                                        "uci": recapture.uci(),
+                                        "san": board.san(recapture),
+                                        "kind": "RECAPTURE",
+                                        "result": None
+                                    }
+
+                                    print(
+                                        "[PREMOVE] Armed safe recapture | "
+                                        f"human={san} reply={board.san(recapture)}"
+                                    )
 
                             analysis_state = None
 
@@ -7919,6 +8058,11 @@ def main():
                             != last_bot_position_key
                             or position_key
                             in pending_bot_moves
+                            or (
+                                armed_premove is not None
+                                and armed_premove.get("position_key")
+                                == position_key
+                            )
                         ):
                             bot_thinking = True
 
@@ -7933,7 +8077,39 @@ def main():
                                 # The same move is used for click, verification and retry.
                                 locked_bot_move = None
 
-                                if pending_entry is not None:
+                                premove_entry = (
+                                    armed_premove
+                                    if (
+                                        armed_premove is not None
+                                        and armed_premove.get("position_key")
+                                        == position_key
+                                    )
+                                    else None
+                                )
+
+                                if premove_entry is not None:
+                                    locked_bot_move = chess.Move.from_uci(
+                                        premove_entry["uci"]
+                                    )
+                                    best_move = locked_bot_move
+                                    result = premove_entry.get("result")
+                                    best_info_move = None
+                                    best_san = board.san(best_move)
+                                    selection_meta = {
+                                        "rank": 0,
+                                        "reason": (
+                                            "conditional premove | "
+                                            f"{premove_entry.get('kind', 'SAFE')}"
+                                        )
+                                    }
+                                    engine_elapsed = 0.0
+
+                                    print(
+                                        "[PREMOVE] Executing armed move: "
+                                        f"{best_san}"
+                                    )
+
+                                elif pending_entry is not None:
                                     locked_bot_move = (
                                         chess.Move.from_uci(
                                             pending_entry["uci"]
@@ -8660,6 +8836,17 @@ def main():
                                         position_key,
                                         None
                                     )
+
+                                    if (
+                                        armed_premove is not None
+                                        and armed_premove.get("position_key")
+                                        == position_key
+                                    ):
+                                        print(
+                                            "[PREMOVE] Confirmed and consumed | "
+                                            f"{best_san}"
+                                        )
+                                        armed_premove = None
 
                                     last_bot_position_key = None
                                     next_main_turn_rescan = time.perf_counter() + TURN_RESCAN_INTERVAL
