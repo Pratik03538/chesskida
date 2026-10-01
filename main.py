@@ -27,8 +27,8 @@ FALLBACK_TITLE_KEYWORD = "scrcpy"
 STOCKFISH_PATH = r"stockfish.exe"
 INITIAL_FEN = chess.STARTING_FEN
 STOCKFISH_DEPTH = 12
-STOCKFISH_TIME = 0.035
-ANALYSIS_TIME = 0.008
+STOCKFISH_TIME = 0.040
+ANALYSIS_TIME = 0.010
 ANALYSIS_DEPTH = 8
 MATCH_THRESHOLD = 0.30
 EMPTY_STD_THRESHOLD = 4.5
@@ -46,7 +46,7 @@ CLICK_HOLD_MAX = 0.0
 # actually selected. This prevents a bad source click (for example selecting
 # a queen when Stockfish asked for a bishop) from turning into a legal but
 # wrong move such as Qxg5 instead of Bxg5.
-BOT_SOURCE_SELECT_TIMEOUT = 0.050
+BOT_SOURCE_SELECT_TIMEOUT = 0.060
 BOT_SOURCE_SELECT_POLL = 0.001
 BOT_SOURCE_SELECT_CHANGE_MIN = 0.0012
 BOT_SOURCE_SELECT_MAX_EXTRA_CHANGES = 0
@@ -57,7 +57,7 @@ PROMOTION_WAIT = 0.050
 PROMOTION_RETRIES = 5
 SCAN_INTERVAL = 0.006
 ORIENTATION_TIMEOUT = 1.2
-HUMAN_MOVE_TIMEOUT = 0.20
+HUMAN_MOVE_TIMEOUT = 0.35
 HUMAN_CONFIRM_SAMPLES = 1
 HUMAN_SETTLE_TIMEOUT = 0.004
 HUMAN_FALLBACK_CHANGE_THRESHOLD = 0.0012
@@ -94,7 +94,7 @@ TURN_RESCAN_CONFIRM_DELAY = 0.025
 TURN_RESCAN_MAX_MISMATCH = 0
 TURN_RESCAN_TOP_CANDIDATES = 6
 
-BOT_VERIFY_TIMEOUT = 0.090
+BOT_VERIFY_TIMEOUT = 0.120
 BOT_CONFIRM_SAMPLES = 1
 BOT_CLICK_RETRIES = 1
 BOT_RECOVERY_POLL = 0.0005
@@ -139,7 +139,7 @@ PROMOTION_FALLBACK = True
 # the squares that are supposed to change. This keeps the same safety invariant:
 # the pre-verified board must change only where the move allows, and the
 # changed squares must contain the exact expected pieces.
-FAST_VERIFY_SIZE = 64
+FAST_VERIFY_SIZE = 96
 FAST_UNCHANGED_MAX_DIFF = 0.055
 FAST_UNEXPECTED_STRONG_DIFF = 0.085
 FAST_REQUIRED_CHANGED_DIFF = 0.0010
@@ -152,8 +152,8 @@ FAST_DEEP_VERIFY_EVERY = 8
 HUMAN_FAST_RESCAN_THRESHOLD = 0.00045
 HUMAN_FAST_RESCAN_TOP_SQUARES = 12
 HUMAN_FAST_RESCAN_TOP_MOVES = 6
-HUMAN_FAST_RESCAN_POLL = 0.0005
-HUMAN_FAST_RESCAN_CONFIRM_TIMEOUT = 0.040
+HUMAN_FAST_RESCAN_POLL = 0.0007
+HUMAN_FAST_RESCAN_CONFIRM_TIMEOUT = 0.050
 
 
 # Template position guards.
@@ -1597,7 +1597,7 @@ def click_move(
         int(tx),
         int(ty)
     )
-    time.sleep(0.005)
+    time.sleep(0.020)
     user32.mouse_event(
         MOUSEEVENTF_LEFTDOWN,
         0,
@@ -1617,7 +1617,7 @@ def click_move(
     # Immediately park the cursor outside the board. It must not sit on
     # the old move while the system is waiting for the verified result.
     user32.SetCursorPos(0, 0)
-    time.sleep(0.003)
+    time.sleep(0.010)
 
     if move.promotion is not None:
         if promotion_color is None:
