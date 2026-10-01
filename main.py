@@ -174,6 +174,19 @@ MATCH_AUTO_DELAY_MAX = 0.0
 MATCH_BUTTON_RETRIES = 10
 MATCHMAKING_SCAN_INTERVAL = 0.10
 
+# The actual result-screen action row from the supplied phone screenshot:
+#   left  -> Rematch
+#   right -> New <time-control>
+# These are normalized coordinates, so they remain valid when scrcpy scales
+# the phone image to a different client size.
+MATCH_REMATCH_CENTER_X = 0.2640
+MATCH_NEW_CENTER_X = 0.7360
+MATCH_ACTION_CENTER_Y = 0.3970
+MATCH_ACTION_BOX_HALF_W = 0.2050
+MATCH_ACTION_BOX_HALF_H = 0.0335
+MATCH_ACTION_DARK_FRACTION_MIN = 0.72
+MATCH_ACTION_LOCAL_CONFIRM_MIN = 0.020
+
 
 def match_ui_mouse_callback(event, x, y, flags, param):
     if event != cv2.EVENT_LBUTTONUP or param is None:
@@ -514,40 +527,114 @@ def match_button_candidates(frame):
         )
     ]
 
-def match_action_points(frame, action):
-    candidates = match_button_candidates(frame)
+def _match_action_visual_score(
+    frame,
+    center_x_norm,
+    center_y_norm
+):
+    """
+    Check the known result-button footprint before allowing a click.
 
-    if len(candidates) >= 2:
-        ordered = sorted(
-            candidates,
-            key=lambda item: item[0]
-        )
+    This is intentionally based on the actual UI geometry from the supplied
+    result screenshot rather than generic contour detection. It prevents
+    player cards/text from being mistaken for the action buttons.
+    """
+    if frame is None:
+        return 0.0
 
-        selected = (
-            ordered[0]
-            if action == "REMATCH"
-            else ordered[1]
-        )
+    height, width = frame.shape[:2]
 
-        print(
-            "[MATCH] Button pair located | "
-            f"REMATCH=({ordered[0][0]},{ordered[0][1]}) "
-            f"NEW=({ordered[1][0]},{ordered[1][1]})"
-        )
+    cx = center_x_norm * width
+    cy = center_y_norm * height
 
-        return [
-            (
-                int(selected[0]),
-                int(selected[1])
-            )
-        ]
+    half_w = MATCH_ACTION_BOX_HALF_W * width
+    half_h = MATCH_ACTION_BOX_HALF_H * height
 
-    print(
-        f"[MATCH] Reliable {action} button pair NOT found | "
-        "refusing fallback click"
+    x1 = max(0, int(cx - half_w))
+    y1 = max(0, int(cy - half_h))
+    x2 = min(width, int(cx + half_w))
+    y2 = min(height, int(cy + half_h))
+
+    if x2 <= x1 or y2 <= y1:
+        return 0.0
+
+    gray = cv2.cvtColor(
+        frame[y1:y2, x1:x2],
+        cv2.COLOR_BGR2GRAY
     )
 
-    return []
+    # The actual button body is predominantly dark gray. White text and
+    # anti-aliased rounded corners account for the remaining pixels.
+    return float(
+        np.mean(
+            (gray >= 35)
+            & (gray <= 95)
+        )
+    )
+
+
+def match_action_points(frame, action):
+    """
+    Return the actual Rematch/New button center from the result-screen UI.
+
+    No generic candidate and NO arbitrary fallback coordinate are used.
+    The button positions come from the supplied screenshot and are checked
+    visually before a click is permitted.
+    """
+    if frame is None:
+        return []
+
+    if action == "REMATCH":
+        center_x = MATCH_REMATCH_CENTER_X
+    elif action == "NEW MATCH":
+        center_x = MATCH_NEW_CENTER_X
+    else:
+        return []
+
+    score = _match_action_visual_score(
+        frame,
+        center_x,
+        MATCH_ACTION_CENTER_Y
+    )
+
+    if score < MATCH_ACTION_DARK_FRACTION_MIN:
+        print(
+            "[MATCH] Button validation failed | "
+            f"action={action} "
+            f"visual_score={score:.3f}"
+        )
+        return []
+
+    height, width = frame.shape[:2]
+
+    px = int(
+        round(
+            center_x * width
+        )
+    )
+    py = int(
+        round(
+            MATCH_ACTION_CENTER_Y * height
+        )
+    )
+
+    print(
+        "[MATCH] Actual result button validated | "
+        f"action={action} "
+        f"center=({px},{py}) "
+        f"visual_score={score:.3f} "
+        f"frame={width}x{height}"
+    )
+
+    return [
+        (
+            px,
+            py,
+            int(MATCH_ACTION_BOX_HALF_W * 2 * width),
+            int(MATCH_ACTION_BOX_HALF_H * 2 * height),
+            score
+        )
+    ]
 
 def _button_local_change_score(before_frame, after_frame, center_x, center_y, radius=28):
     if before_frame is None or after_frame is None:
@@ -678,17 +765,31 @@ def perform_match_action(sct, hwnd, action):
                     after
                 )
 
-                if (
-                    local_change >= MATCH_BUTTON_MIN_CHANGE
-                    or screen_change >= 0.20
-                ):
+                # Never confirm from a global screen change alone. A wrong
+                # click elsewhere on the result screen can change many pixels
+                # and previously caused false "CLICK CONFIRMED" messages.
+                target_confirm = _button_local_change_score(
+                    frame_before,
+                    after,
+                    px,
+                    py,
+                    radius=max(
+                        28,
+                        int(
+                            min(frame_before.shape[:2])
+                            * 0.055
+                        )
+                    )
+                )
+
+                if target_confirm >= MATCH_ACTION_LOCAL_CONFIRM_MIN:
                     print(
                         f"[MATCH] {action} CLICK CONFIRMED | "
-                        "target button changed and disappeared | "
+                        "actual target region changed | "
                         f"screen_change={screen_change:.3f} "
-                        f"local_change={local_change:.3f}"
+                        f"target_change={target_confirm:.3f}"
                     )
-                    return True, "button transition confirmed"
+                    return True, "target button transition confirmed"
 
                 time.sleep(0.02)
 
