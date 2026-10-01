@@ -4584,7 +4584,6 @@ def fast_expected_post_state_confirmed(
         board_coords[2] / 8.0, board_coords[3] / 8.0
     )
 
-    # Exact piece-state verification only on the affected squares.
     def expected_piece_at(frame, square, expected_symbol):
         crop = get_square_crop(
             frame, board_coords, square, black_perspective
@@ -4599,15 +4598,53 @@ def fast_expected_post_state_confirmed(
         return detected == expected_symbol, detected, score
 
     source_piece = board.piece_at(move.from_square)
-    source_ok, source_detected, source_score = expected_piece_at(after_frame, move.from_square, None)
-    if not source_ok:
-        return False, f"source not empty after move ({source_detected or '-'}:{source_score:.3f})"
 
-    expected_target = expected_symbol_after(board, move, move.to_square)
+    # For ordinary moves, source disappearance is verified by the physical
+    # motion of the source square instead of asking the empty-square classifier
+    # to prove that the square is empty. Empty/background squares are the most
+    # common source of false negatives because highlights/anti-aliasing can
+    # resemble the old piece template.
+    source_change = observed_changes.get(move.from_square, 0.0)
+    target_change = observed_changes.get(move.to_square, 0.0)
+
+    expected_target = expected_symbol_after(
+        board,
+        move,
+        move.to_square
+    )
+
     if expected_target is not None:
-        target_ok, target_detected, target_score = expected_piece_at(after_frame, move.to_square, expected_target)
+        target_ok, target_detected, target_score = expected_piece_at(
+            after_frame,
+            move.to_square,
+            expected_target
+        )
         if not target_ok:
-            return False, f"destination mismatch ({target_detected or '-'}:{target_score:.3f}, expected {expected_target})"
+            return False, (
+                f"destination mismatch "
+                f"({target_detected or '-'}:{target_score:.3f}, "
+                f"expected {expected_target})"
+            )
+
+        if target_change < FAST_REQUIRED_CHANGED_DIFF:
+            return False, (
+                f"destination transition too weak: "
+                f"{target_change:.4f}"
+            )
+
+    if move.from_square != move.to_square:
+        if source_piece is None:
+            return False, "internal source piece missing"
+
+        source_min_change = max(
+            0.0007,
+            FAST_REQUIRED_CHANGED_DIFF
+        )
+        if source_change < source_min_change:
+            return False, (
+                f"source transition too weak: "
+                f"{source_change:.4f}"
+            )
 
     if board.is_castling(move):
         rook_to = (
@@ -4616,18 +4653,55 @@ def fast_expected_post_state_confirmed(
             chess.F8 if board.is_kingside_castling(move) else chess.D8
         )
         rook_expected = "R" if board.turn == chess.WHITE else "r"
-        rook_ok, rook_detected, rook_score = expected_piece_at(after_frame, rook_to, rook_expected)
+        rook_ok, rook_detected, rook_score = expected_piece_at(
+            after_frame,
+            rook_to,
+            rook_expected
+        )
         if not rook_ok:
-            return False, f"castling rook mismatch ({rook_detected or '-'}:{rook_score:.3f})"
+            return False, (
+                f"castling rook mismatch "
+                f"({rook_detected or '-'}:{rook_score:.3f})"
+            )
+
+        rook_change = observed_changes.get(rook_to, 0.0)
+        if rook_change < FAST_REQUIRED_CHANGED_DIFF:
+            return False, (
+                f"castling rook transition too weak: "
+                f"{rook_change:.4f}"
+            )
 
     if board.is_en_passant(move):
-        captured_square = move.to_square - 8 if board.turn == chess.WHITE else move.to_square + 8
-        captured_ok, captured_detected, captured_score = expected_piece_at(after_frame, captured_square, None)
+        captured_square = (
+            move.to_square - 8
+            if board.turn == chess.WHITE
+            else move.to_square + 8
+        )
+        captured_change = observed_changes.get(
+            captured_square,
+            0.0
+        )
+        captured_ok, captured_detected, captured_score = expected_piece_at(
+            after_frame,
+            captured_square,
+            None
+        )
         if not captured_ok:
-            return False, f"en-passant captured square not empty ({captured_detected or '-'}:{captured_score:.3f})"
+            return False, (
+                f"en-passant captured square not empty "
+                f"({captured_detected or '-'}:{captured_score:.3f})"
+            )
 
-    return True, "fast physical post-state confirmed"
+        if captured_change < FAST_REQUIRED_CHANGED_DIFF:
+            return False, (
+                f"en-passant captured square transition too weak: "
+                f"{captured_change:.4f}"
+            )
 
+    return True, (
+        "fast physical post-state confirmed "
+        f"src={source_change:.4f} dst={target_change:.4f}"
+    )
 
 def fast_preclick_board_confirmed(
     reference_frame,
