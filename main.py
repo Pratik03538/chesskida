@@ -8945,14 +8945,12 @@ def main():
                         + MATCH_NEW_GAME_CHECK_INTERVAL
                     )
 
-                if match_ui.get("screen_guard"):
-                    status = (
-                        "PAUSED - SCREEN HIDDEN >30% | "
-                        "WAITING FOR BOARD / NEW MATCH"
-                    )
+                status = "READY - PRESS R"
 
-                elif match_ui.get("phase") == "RESULT":
-                    status =
+                if (
+                    grid_locked
+                    and cached_board_coords
+                ):
                     if (
                         not game_ready
                         or stockfish_color is None
@@ -8982,6 +8980,12 @@ def main():
                             f"SCAN "
                             f"{last_scan_time_ms:.1f}ms"
                         )
+
+                if match_ui.get("screen_guard"):
+                    status = (
+                        "PAUSED - SCREEN HIDDEN >30% | "
+                        "WAITING FOR BOARD / NEW MATCH"
+                    )
 
                 if (
                     game_ready
