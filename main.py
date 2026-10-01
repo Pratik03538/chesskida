@@ -9219,9 +9219,14 @@ def main():
                                 "[INFO] First move is WHITE."
                             )
 
-                            print(
-                                "[INFO] Game READY."
-                            )
+                            if game_ready:
+                                print(
+                                    "[INFO] Game READY."
+                                )
+                            else:
+                                print(
+                                    "[INFO] Waiting for NEW MATCH..."
+                                )
 
                     else:
                         game_ready = False
