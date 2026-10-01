@@ -9087,29 +9087,17 @@ def main():
                             )
 
                         else:
-                            visual_black_perspective = (
-                                detect_board_orientation(
-                                    locked_grid,
-                                    board
-                                )
-                            )
-
-                            stockfish_color = (
-                                detect_bottom_stockfish_color(
-                                    visual_black_perspective
-                                )
-                            )
-
-                            human_color = (
-                                chess.BLACK
-                                if stockfish_color == chess.WHITE
-                                else chess.WHITE
-                            )
-
+                            # Do not infer a chess orientation/player side from a
+                            # non-board screen. The fresh-game detector validates
+                            # START / START+WHITE-MOVE first, then supplies the
+                            # trusted perspective and colors.
                             cached_board_grid = locked_grid
                             baseline_frame = locked_frame
 
                             startup_new_game = None
+                            visual_black_perspective = False
+                            stockfish_color = None
+                            human_color = None
 
                             # Do not assume that locking the grid means a
                             # match exists. A game may start later, so probe
@@ -9262,38 +9250,38 @@ def main():
                                 RANDOM_BUFFER_MOVE_MAX
                             )
 
-                            print(
-                                "[INFO] Bottom side:",
-                                (
-                                    "BLACK"
-                                    if stockfish_color == chess.BLACK
-                                    else "WHITE"
-                                )
-                            )
-
-                            print(
-                                "[INFO] Stockfish:",
-                                (
-                                    "BLACK"
-                                    if stockfish_color == chess.BLACK
-                                    else "WHITE"
-                                )
-                            )
-
-                            print(
-                                "[INFO] Human:",
-                                (
-                                    "BLACK"
-                                    if human_color == chess.BLACK
-                                    else "WHITE"
-                                )
-                            )
-
-                            print(
-                                "[INFO] First move is WHITE."
-                            )
-
                             if game_ready:
+                                print(
+                                    "[INFO] Bottom side:",
+                                    (
+                                        "BLACK"
+                                        if stockfish_color == chess.BLACK
+                                        else "WHITE"
+                                    )
+                                )
+
+                                print(
+                                    "[INFO] Stockfish:",
+                                    (
+                                        "BLACK"
+                                        if stockfish_color == chess.BLACK
+                                        else "WHITE"
+                                    )
+                                )
+
+                                print(
+                                    "[INFO] Human:",
+                                    (
+                                        "BLACK"
+                                        if human_color == chess.BLACK
+                                        else "WHITE"
+                                    )
+                                )
+
+                                print(
+                                    "[INFO] First move is WHITE."
+                                )
+
                                 print(
                                     "[INFO] Game READY."
                                 )
