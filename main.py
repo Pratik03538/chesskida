@@ -1088,12 +1088,12 @@ def _new_game_expected_fallback_exact_count(
     board_coords,
     black_perspective
 ):
-    """Re-check only mismatched occupied squares using the expected piece.
+    """Re-check mismatched occupied squares using the expected piece.
 
-    The normal fast scan can occasionally confuse visually similar templates
-    such as rook/bishop. Use the same expected-piece fallback as the normal
-    full-board verifier, but only for the single best new-game candidate so
-    matchmaking remains fast.
+    Keep the normal 64-square exact score as the base. Only repair occupied
+    squares where the generic classifier confused a visually similar piece.
+    Empty-square mismatches remain mismatches, so this cannot turn a generic
+    UI frame into a valid chess position.
     """
     if frame is None:
         return 0
@@ -1157,7 +1157,6 @@ def _new_game_expected_fallback_exact_count(
             exact += 1
 
     return exact
-
 
 def _new_game_detected_piece_count(
     grid,
@@ -1296,6 +1295,37 @@ def detect_new_game_state(
             exact = fallback_exact
 
     if exact < MATCH_NEW_GAME_MIN_EXACT:
+        full_ok, full_reason = full_board_state_confirmed(
+            frame,
+            candidate_board,
+            board_coords,
+            perspective
+        )
+
+        if full_ok:
+            exact = 64
+            progress(
+                "MATCH",
+                (
+                    "new-game candidate recovered by "
+                    f"full-board verification | perspective="
+                    f"{'BLACK' if perspective else 'WHITE'}"
+                ),
+                key="new_match_full_board_recovery",
+                interval=0.50
+            )
+        else:
+            fallback_exact = _new_game_expected_fallback_exact_count(
+                frame,
+                candidate_board,
+                board_coords,
+                perspective
+            )
+
+            if fallback_exact > exact:
+                exact = fallback_exact
+
+    if exact < MATCH_NEW_GAME_MIN_EXACT:
         progress(
             "MATCH",
             (
@@ -1361,17 +1391,27 @@ def detect_new_game_state(
     )
 
     if confirm_exact < MATCH_NEW_GAME_MIN_EXACT:
-        confirm_exact_fallback = (
-            _new_game_expected_fallback_exact_count(
-                confirm_frame,
-                candidate_board,
-                board_coords,
-                perspective
-            )
+        confirm_full_ok, confirm_full_reason = full_board_state_confirmed(
+            confirm_frame,
+            candidate_board,
+            board_coords,
+            perspective
         )
 
-        if confirm_exact_fallback > confirm_exact:
-            confirm_exact = confirm_exact_fallback
+        if confirm_full_ok:
+            confirm_exact = 64
+        else:
+            confirm_exact_fallback = (
+                _new_game_expected_fallback_exact_count(
+                    confirm_frame,
+                    candidate_board,
+                    board_coords,
+                    perspective
+                )
+            )
+
+            if confirm_exact_fallback > confirm_exact:
+                confirm_exact = confirm_exact_fallback
 
     if confirm_exact < MATCH_NEW_GAME_MIN_EXACT:
         progress(
@@ -11256,16 +11296,9 @@ def main():
                             if fresh_game.get("first_move") is not None:
                                 first_move = fresh_game["first_move"]
 
-                                try:
-                                    san = board.san(first_move)
-                                except Exception:
-                                    san = first_move.uci()
-
-                                board.push(first_move)
-
                                 print(
                                     "[MATCH] WHITE MOVE ALREADY PRESENT | "
-                                    f"{first_move.uci()} {san} | internal board synced"
+                                    f"{first_move.uci()} | internal board synced"
                                 )
 
                             new_match_start_stable = 0
