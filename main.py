@@ -8133,52 +8133,52 @@ def main():
 
                                 else:
                                     print(
-                                        "[ENGINE] "
-                                        f"depth={STOCKFISH_DEPTH} "
-                                        f"time={engine_elapsed:.3f}s "
-                                        f"MultiPV={len(multipv_result)}"
+                                    "[ENGINE] "
+                                    f"depth={STOCKFISH_DEPTH} "
+                                    f"time={engine_elapsed:.3f}s "
+                                    f"MultiPV={len(multipv_result)}"
                                     )
 
-                                        print(
-                                            "[TRAINING] "
-                                            f"BEST="
-                                            f"{best_info_move.uci() if best_info_move else '-'} "
-                                            f"SELECTED="
-                                            f"{best_move.uci()} "
-                                            f"RANK="
-                                            f"#{selection_meta['rank'] + 1}"
-                                        )
+                                    print(
+                                        "[TRAINING] "
+                                        f"BEST="
+                                        f"{best_info_move.uci() if best_info_move else '-'} "
+                                        f"SELECTED="
+                                        f"{best_move.uci()} "
+                                        f"RANK="
+                                        f"#{selection_meta['rank'] + 1}"
+                                    )
 
-                                        print(
-                                            "[TRAINING] "
-                                            f"{selection_meta['reason']}"
-                                        )
+                                    print(
+                                        "[TRAINING] "
+                                        f"{selection_meta['reason']}"
+                                    )
 
-                                        (
-                                            recent_accuracy,
-                                            recent_samples
-                                        ) = opponent_recent_accuracy(
-                                            opponent_match_history
-                                        )
+                                    (
+                                        recent_accuracy,
+                                        recent_samples
+                                    ) = opponent_recent_accuracy(
+                                        opponent_match_history
+                                    )
 
-                                        adaptive_profile = adaptive_accuracy_profile(
-                                            recent_accuracy,
-                                            recent_samples
-                                        )
+                                    adaptive_profile = adaptive_accuracy_profile(
+                                        recent_accuracy,
+                                        recent_samples
+                                    )
 
-                                        print(
-                                            "[ADAPT] "
-                                            f"opponent="
-                                            f"{recent_accuracy if recent_accuracy is not None else 0.0:.1f}% "
-                                            f"target="
-                                            f"{adaptive_profile['target_accuracy']:.1f}% "
-                                            f"state="
-                                            f"{adaptive_profile['state']} "
-                                            f"rank_cap="
-                                            f"#{adaptive_profile['max_rank'] + 1} "
-                                            f"max_drop="
-                                            f"{adaptive_profile['max_eval_drop']*100:.1f}%"
-                                        )
+                                    print(
+                                        "[ADAPT] "
+                                        f"opponent="
+                                        f"{recent_accuracy if recent_accuracy is not None else 0.0:.1f}% "
+                                        f"target="
+                                        f"{adaptive_profile['target_accuracy']:.1f}% "
+                                        f"state="
+                                        f"{adaptive_profile['state']} "
+                                        f"rank_cap="
+                                        f"#{adaptive_profile['max_rank'] + 1} "
+                                        f"max_drop="
+                                        f"{adaptive_profile['max_eval_drop']*100:.1f}%"
+                                    )
 
 
                                 # From this point until physical confirmation, only the
