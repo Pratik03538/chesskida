@@ -512,7 +512,7 @@ def match_ui_draw(
 
     panel_w = min(
         560,
-        max(460, width - 16)
+        max(420, width - 16)
     )
     panel_h = 150
 
