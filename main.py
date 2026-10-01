@@ -5291,7 +5291,11 @@ def fast_pending_move_recovery(
         )
 
         ranked = []
-        for human_move in after_bot.legal_moves:
+        all_legal_replies = list(after_bot.legal_moves)
+
+        # First prefer replies whose source/target squares are among the strongest
+        # observed changes. This keeps the recovery fast in the common case.
+        for human_move in all_legal_replies:
             if (
                 human_move.from_square not in top_squares
                 or human_move.to_square not in top_squares
@@ -5316,7 +5320,48 @@ def fast_pending_move_recovery(
             key=lambda item: item[0]
         )
 
-        for _, human_move in ranked[:6]:
+        checked = set()
+        for _, human_move in ranked[:8]:
+            checked.add(human_move.uci())
+            ok, reason = _fast_expected_sequence_state(
+                frame,
+                board,
+                [pending_move, human_move],
+                board_coords,
+                black_perspective
+            )
+            if ok:
+                return pending_move, human_move, "BOT_PLUS_HUMAN", reason
+
+        # Recovery-only fallback: a legitimate human move can have weak visual
+        # motion (for example Nc6 after a bot c3) and therefore miss the top-square
+        # shortlist. Check every remaining legal reply against the exact final
+        # affected-square state. This path is only reached after the fast shortlist
+        # fails, so it does not add cost to normal move execution.
+        fallback_ranked = []
+        for human_move in all_legal_replies:
+            if human_move.uci() in checked:
+                continue
+
+            affected = set(
+                expected_changed_squares(board, pending_move)
+            )
+            affected.update(
+                expected_changed_squares(after_bot, human_move)
+            )
+
+            score = sum(
+                _fast_visual_score(scores, square, black_perspective)
+                for square in affected
+            )
+            fallback_ranked.append((score, human_move))
+
+        fallback_ranked.sort(
+            reverse=True,
+            key=lambda item: item[0]
+        )
+
+        for _, human_move in fallback_ranked:
             ok, reason = _fast_expected_sequence_state(
                 frame,
                 board,
