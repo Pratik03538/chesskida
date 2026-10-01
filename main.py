@@ -1,3 +1,4 @@
+# FAST-MAIN BASELINE: copied from main; only performance timings/search/capture sizing tuned.
 import cv2
 import numpy as np
 import mss
@@ -25,10 +26,10 @@ SCRCPY_WINDOW_TITLE = "CHESS_MOBILE"
 FALLBACK_TITLE_KEYWORD = "scrcpy"
 STOCKFISH_PATH = r"stockfish.exe"
 INITIAL_FEN = chess.STARTING_FEN
-STOCKFISH_DEPTH = 14
-STOCKFISH_TIME = 0.065
-ANALYSIS_TIME = 0.025
-ANALYSIS_DEPTH = 10
+STOCKFISH_DEPTH = 12
+STOCKFISH_TIME = 0.035
+ANALYSIS_TIME = 0.008
+ANALYSIS_DEPTH = 8
 MATCH_THRESHOLD = 0.30
 EMPTY_STD_THRESHOLD = 4.5
 
@@ -45,23 +46,23 @@ CLICK_HOLD_MAX = 0.0
 # actually selected. This prevents a bad source click (for example selecting
 # a queen when Stockfish asked for a bishop) from turning into a legal but
 # wrong move such as Qxg5 instead of Bxg5.
-BOT_SOURCE_SELECT_TIMEOUT = 0.16
-BOT_SOURCE_SELECT_POLL = 0.003
+BOT_SOURCE_SELECT_TIMEOUT = 0.050
+BOT_SOURCE_SELECT_POLL = 0.001
 BOT_SOURCE_SELECT_CHANGE_MIN = 0.0012
 BOT_SOURCE_SELECT_MAX_EXTRA_CHANGES = 0
 BOT_SOURCE_SELECT_DOMINANCE_RATIO = 0.80
-BOT_SOURCE_SELECT_STABLE_SAMPLES = 2
+BOT_SOURCE_SELECT_STABLE_SAMPLES = 1
 
 PROMOTION_WAIT = 0.050
 PROMOTION_RETRIES = 5
 SCAN_INTERVAL = 0.006
 ORIENTATION_TIMEOUT = 1.2
-HUMAN_MOVE_TIMEOUT = 1.25
+HUMAN_MOVE_TIMEOUT = 0.20
 HUMAN_CONFIRM_SAMPLES = 1
 HUMAN_SETTLE_TIMEOUT = 0.004
 HUMAN_FALLBACK_CHANGE_THRESHOLD = 0.0012
 HUMAN_FALLBACK_TOP_SQUARES = 4
-HUMAN_FALLBACK_SCAN_INTERVAL = 0.020
+HUMAN_FALLBACK_SCAN_INTERVAL = 0.010
 
 # After the normal human detector has had about two seconds of waiting,
 # run a full-board ultra recovery scan. This repeats every two seconds
@@ -93,17 +94,17 @@ TURN_RESCAN_CONFIRM_DELAY = 0.025
 TURN_RESCAN_MAX_MISMATCH = 0
 TURN_RESCAN_TOP_CANDIDATES = 6
 
-BOT_VERIFY_TIMEOUT = 0.35
+BOT_VERIFY_TIMEOUT = 0.090
 BOT_CONFIRM_SAMPLES = 1
-BOT_CLICK_RETRIES = 2
-BOT_RECOVERY_POLL = 0.001
+BOT_CLICK_RETRIES = 1
+BOT_RECOVERY_POLL = 0.0005
 
 # A bot move is considered physically completed only when the expected
 # source/target transition is visible with a meaningful pixel change.
 BOT_SOURCE_CHANGE_MIN = 0.0060
 BOT_TARGET_CHANGE_MIN = 0.0060
 BOT_TRANSITION_TOTAL_MIN = 0.0200
-BOT_CONFIRM_GAP = 0.008
+BOT_CONFIRM_GAP = 0.0
 
 # Bot post-move piece matching can be slightly less strict than the
 # general board scan because the Android/scrcpy frame may contain a
@@ -138,7 +139,7 @@ PROMOTION_FALLBACK = True
 # the squares that are supposed to change. This keeps the same safety invariant:
 # the pre-verified board must change only where the move allows, and the
 # changed squares must contain the exact expected pieces.
-FAST_VERIFY_SIZE = 128
+FAST_VERIFY_SIZE = 64
 FAST_UNCHANGED_MAX_DIFF = 0.055
 FAST_UNEXPECTED_STRONG_DIFF = 0.085
 FAST_REQUIRED_CHANGED_DIFF = 0.0010
@@ -151,8 +152,8 @@ FAST_DEEP_VERIFY_EVERY = 8
 HUMAN_FAST_RESCAN_THRESHOLD = 0.00045
 HUMAN_FAST_RESCAN_TOP_SQUARES = 12
 HUMAN_FAST_RESCAN_TOP_MOVES = 6
-HUMAN_FAST_RESCAN_POLL = 0.0015
-HUMAN_FAST_RESCAN_CONFIRM_TIMEOUT = 0.10
+HUMAN_FAST_RESCAN_POLL = 0.0005
+HUMAN_FAST_RESCAN_CONFIRM_TIMEOUT = 0.040
 
 
 # Template position guards.
@@ -1562,7 +1563,7 @@ def click_move(
     # Keep the mouse cursor completely away from the chess board between
     # moves. This prevents it from remaining on the previous source/target.
     user32.SetCursorPos(0, 0)
-    time.sleep(0.010)
+    time.sleep(0.003)
 
     # Select the locked source with a real press/hold/release sequence.
     # The slightly longer hold makes source registration more reliable
@@ -1571,7 +1572,7 @@ def click_move(
         int(sx),
         int(sy)
     )
-    time.sleep(0.020)
+    time.sleep(0.005)
     user32.mouse_event(
         MOUSEEVENTF_LEFTDOWN,
         0,
@@ -1579,7 +1580,7 @@ def click_move(
         0,
         0
     )
-    time.sleep(0.035)
+    time.sleep(0.020)
     user32.mouse_event(
         MOUSEEVENTF_LEFTUP,
         0,
@@ -1588,7 +1589,7 @@ def click_move(
         0
     )
 
-    time.sleep(0.025)
+    time.sleep(0.008)
 
     # Drop only on the locked destination, again using a real
     # press/hold/release sequence.
@@ -1596,7 +1597,7 @@ def click_move(
         int(tx),
         int(ty)
     )
-    time.sleep(0.020)
+    time.sleep(0.005)
     user32.mouse_event(
         MOUSEEVENTF_LEFTDOWN,
         0,
@@ -1604,7 +1605,7 @@ def click_move(
         0,
         0
     )
-    time.sleep(0.030)
+    time.sleep(0.020)
     user32.mouse_event(
         MOUSEEVENTF_LEFTUP,
         0,
@@ -1616,7 +1617,7 @@ def click_move(
     # Immediately park the cursor outside the board. It must not sit on
     # the old move while the system is waiting for the verified result.
     user32.SetCursorPos(0, 0)
-    time.sleep(0.010)
+    time.sleep(0.003)
 
     if move.promotion is not None:
         if promotion_color is None:
