@@ -9500,10 +9500,10 @@ def main():
                                         ),
                                         "selected": best_move.uci(),
                                         "rank": (
-                                        f"#{int(selection_meta.get('rank')) + 1}"
-                                        if selection_meta.get("rank") is not None
-                                        else "FREE"
-                                    ),
+                                            f"#{int(selection_meta.get('rank')) + 1}"
+                                            if selection_meta.get("rank") is not None
+                                            else "FREE"
+                                        ),
                                         "best_cp": selection_meta.get("current_cp"),
                                         "selected_cp": selection_meta.get("selected_cp"),
                                         "reason": str(
@@ -9557,6 +9557,10 @@ def main():
                                         )
 
                                     else:
+                                        print(
+                                            "[BOOK] OUT OF BOOK -> "
+                                            "switching to human-like engine logic"
+                                        )
                                         print(
                                             "[STOCKFISH] Thinking..."
                                         )
