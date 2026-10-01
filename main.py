@@ -173,9 +173,6 @@ def match_ui_mouse_callback(event, x, y, flags, param):
     if event != cv2.EVENT_LBUTTONUP or param is None:
         return
 
-    if param.get("phase") != "RESULT":
-        return
-
     def inside(rect):
         if rect is None:
             return False
@@ -7927,7 +7924,18 @@ def main():
         "rematch_off_rect": None,
         "new_match_on_rect": None,
         "new_match_off_rect": None,
+        "controls_rect": None,
         "result_text": "WAITING FOR NEW MATCH...",
+        "preference": {
+            "best": "-",
+            "selected": "-",
+            "rank": "-",
+            "best_cp": None,
+            "selected_cp": None,
+            "reason": "-",
+        },
+        "board_obstruction": 0.0,
+        "screen_guard": False,
     }
 
     match_result_streak = 0
@@ -8028,6 +8036,16 @@ def main():
                     match_ui["phase"] = "IDLE"
                     match_ui["requested_action"] = None
                     match_ui["result_text"] = "WAITING FOR NEW MATCH..."
+                    match_ui["preference"] = {
+                        "best": "-",
+                        "selected": "-",
+                        "rank": "-",
+                        "best_cp": None,
+                        "selected_cp": None,
+                        "reason": "-",
+                    }
+                    match_ui["board_obstruction"] = 0.0
+                    match_ui["screen_guard"] = False
                     match_result_streak = 0
                     match_auto_after = None
 
