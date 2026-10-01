@@ -1214,9 +1214,9 @@ def detect_new_game_state(
         False
     )
 
-    if detected_piece_count < MATCH_NEW_GAME_MIN_DETECTED_PIECES:
-        return None
-
+    # Do not reject here solely because the generic piece classifier missed
+    # some pieces. The definitive gate below is the 64-square position match;
+    # a blank/searching screen cannot reach that exactness level.
     start_board = chess.Board(
         INITIAL_FEN
     )
@@ -11150,101 +11150,64 @@ def main():
                     and cached_board_coords
                     and time.perf_counter() >= match_next_scan
                 ):
+                    # Poll the LIVE frame directly. The previous implementation
+                    # spent up to 0.25s inside stable_initial_scan() before doing
+                    # the real START test, which made a newly appeared starting
+                    # board easy to miss. detect_new_game_state() already performs
+                    # its own two-frame physical confirmation.
                     match_next_scan = (
                         time.perf_counter()
                         + MATCHMAKING_SCAN_INTERVAL
                     )
 
-                    (
-                        fresh_frame,
-                        fresh_grid
-                    ) = stable_initial_scan(
+                    fresh_game = detect_new_game_state(
                         sct,
                         scrcpy_hwnd,
                         cached_board_coords,
-                        timeout=0.25
+                        source_frame=frame
                     )
 
-                    if (
-                        fresh_frame is not None
-                        and fresh_grid is not None
-                    ):
-                        start_board = chess.Board(
-                            INITIAL_FEN
+                    if fresh_game is None:
+                        progress(
+                            "MATCH",
+                            "waiting for START / START+WHITE-MOVE",
+                            key="matchmaking_wait",
+                            interval=0.75
+                        )
+                    else:
+                        fresh_key = (
+                            f"{int(fresh_game['perspective'])}:"
+                            f"{fresh_game['kind']}:"
+                            f"{fresh_game['first_move'].uci() if fresh_game.get('first_move') is not None else '-'}"
                         )
 
-                        fresh_perspective = detect_board_orientation(
-                            fresh_grid,
-                            start_board
+                        if fresh_key == new_match_start_key:
+                            new_match_start_stable += 1
+                        else:
+                            new_match_start_key = fresh_key
+                            new_match_start_stable = 1
+
+                        print(
+                            "[MATCH] Fresh game candidate | "
+                            f"key={fresh_key} "
+                            f"exact={fresh_game['exact']}/64 "
+                            f"stable={new_match_start_stable}/2"
                         )
 
-                        fresh_stockfish_color = detect_bottom_stockfish_color(
-                            fresh_perspective
-                        )
-
-                        fresh_human_color = (
-                            chess.BLACK
-                            if fresh_stockfish_color == chess.WHITE
-                            else chess.WHITE
-                        )
-
-                        start_ok, _ = full_board_state_confirmed(
-                            fresh_frame,
-                            start_board,
-                            cached_board_coords,
-                            fresh_perspective
-                        )
-
-                        first_move = None
-                        first_verified_frame = None
-                        first_ready = start_ok
-
-                        if (
-                            not first_ready
-                            and fresh_human_color == chess.WHITE
-                        ):
-                            first_move = detect_existing_white_first_move(
-                                fresh_frame,
-                                start_board,
-                                cached_board_coords,
-                                fresh_perspective
+                        if new_match_start_stable >= 2:
+                            board = fresh_game["board"]
+                            visual_black_perspective = (
+                                fresh_game["perspective"]
                             )
+                            stockfish_color = (
+                                fresh_game["stockfish_color"]
+                            )
+                            human_color = (
+                                fresh_game["human_color"]
+                            )
+                            cached_board_grid = fresh_game["grid"]
+                            baseline_frame = fresh_game["frame"]
 
-                            if first_move is not None:
-                                expected_first_board = (
-                                    expected_board_after_move(
-                                        start_board,
-                                        first_move
-                                    )
-                                )
-
-                                (
-                                    first_ok,
-                                    first_verified_frame,
-                                    first_reason
-                                ) = verify_human_move_on_screen(
-                                    sct,
-                                    scrcpy_hwnd,
-                                    expected_first_board,
-                                    fresh_frame,
-                                    cached_board_coords,
-                                    fresh_perspective,
-                                    first_move,
-                                    start_board.copy(
-                                        stack=False
-                                    )
-                                )
-
-                                if first_ok:
-                                    first_ready = True
-
-                        if first_ready:
-                            board = start_board
-                            visual_black_perspective = fresh_perspective
-                            stockfish_color = fresh_stockfish_color
-                            human_color = fresh_human_color
-                            cached_board_grid = fresh_grid
-                            baseline_frame = fresh_frame
                             game_ready = True
                             bot_thinking = False
                             analysis_state = None
@@ -11277,6 +11240,8 @@ def main():
                             match_ui["phase"] = "GAME"
                             match_ui["requested_action"] = None
                             match_ui["result_text"] = "WAITING FOR NEW MATCH..."
+                            match_ui["screen_guard"] = False
+                            match_ui["board_obstruction"] = 0.0
                             match_result_streak = 0
                             match_auto_after = None
 
@@ -11288,35 +11253,23 @@ def main():
                                 f"{'WHITE' if human_color == chess.WHITE else 'BLACK'}"
                             )
 
-                            if (
-                                first_move is not None
-                                and first_verified_frame is not None
-                            ):
-                                san = board.san(first_move)
+                            if fresh_game.get("first_move") is not None:
+                                first_move = fresh_game["first_move"]
+
+                                try:
+                                    san = board.san(first_move)
+                                except Exception:
+                                    san = first_move.uci()
+
                                 board.push(first_move)
-                                baseline_frame = first_verified_frame
-
-                                (
-                                    cached_board_grid,
-                                    _,
-                                    last_scan_time_ms
-                                ) = scan_board(
-                                    baseline_frame,
-                                    cached_board_coords
-                                )
 
                                 print(
-                                    "[MATCH] White-human first move already present | "
-                                    f"{first_move.uci()} | internal board synced"
+                                    "[MATCH] WHITE MOVE ALREADY PRESENT | "
+                                    f"{first_move.uci()} {san} | internal board synced"
                                 )
 
-                                print(
-                                    "[MATCH] First move SAN="
-                                    f"{san} | next turn="
-                                    f"{'WHITE' if board.turn == chess.WHITE else 'BLACK'}"
-                                    "/"
-                                    f"{'STOCKFISH' if board.turn == stockfish_color else 'HUMAN'}"
-                                )
+                            new_match_start_stable = 0
+                            new_match_start_key = None
 
                 if match_ui.get("phase") == "RESULT":
                     status = "RESULT SCREEN | REMATCH / NEW MATCH AUTO CONTROLS"
