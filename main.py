@@ -8935,24 +8935,74 @@ def main():
                                             reason = post_reason
                                             break
 
-                                        pre_retry_ok, pre_retry_reason = fast_preclick_board_confirmed(
-                                            before_frame,
-                                            retry_frame,
-                                            board,
-                                            best_move,
-                                            cached_board_coords,
-                                            visual_black_perspective
+                                        # RETRY SAFETY:
+                                        # Never allow a second bot touch based on the fast
+                                        # source-piece classifier alone. A landed move can
+                                        # leave the old source square visually ambiguous,
+                                        # which can otherwise turn the retry into a legal
+                                        # next-turn premove (for example Nf3 -> retry g1f3).
+                                        #
+                                        # A retry is permitted ONLY when two fresh FULL-BOARD
+                                        # scans both prove that the physical board is still
+                                        # exactly the internal pre-move position.
+                                        retry_full_a = capture_screen(
+                                            sct,
+                                            scrcpy_hwnd
                                         )
+                                        strict_retry_ok = False
+                                        strict_retry_reason = "retry pre-state not strictly confirmed"
 
-                                        if not pre_retry_ok:
-                                            # Do not click through an intermediate/unknown
-                                            # frame. Leave the frozen move pending and let
-                                            # the next loop confirm the exact pre-state or
-                                            # already-landed post-state.
+                                        if retry_full_a is not None:
+                                            full_a_ok, full_a_reason = full_board_state_confirmed(
+                                                retry_full_a,
+                                                board,
+                                                cached_board_coords,
+                                                visual_black_perspective
+                                            )
+
+                                            if full_a_ok:
+                                                retry_full_b = capture_screen(
+                                                    sct,
+                                                    scrcpy_hwnd
+                                                )
+
+                                                if retry_full_b is not None:
+                                                    full_b_ok, full_b_reason = full_board_state_confirmed(
+                                                        retry_full_b,
+                                                        board,
+                                                        cached_board_coords,
+                                                        visual_black_perspective
+                                                    )
+
+                                                    if full_b_ok:
+                                                        strict_retry_ok = True
+                                                        strict_retry_reason = (
+                                                            "two-frame exact full-board pre-state confirmed"
+                                                        )
+                                                    else:
+                                                        strict_retry_reason = (
+                                                            "second full-board pre-state failed: "
+                                                            + full_b_reason
+                                                        )
+                                                else:
+                                                    strict_retry_reason = (
+                                                        "second full-board retry frame unavailable"
+                                                    )
+                                            else:
+                                                strict_retry_reason = (
+                                                    "first full-board pre-state failed: "
+                                                    + full_a_reason
+                                                )
+
+                                        if not strict_retry_ok:
+                                            # If the first touch landed, or the board is in
+                                            # any intermediate/uncertain state, stop here.
+                                            # Do NOT send another source+target pair.
                                             print(
-                                                "[VALIDATION] WAITING RETRY | physical board "
-                                                "not yet stable; no additional click | "
-                                                f"{pre_retry_reason}"
+                                                "[VALIDATION] RETRY BLOCKED | "
+                                                "physical board is not exactly the internal "
+                                                "pre-move state; no second touch | "
+                                                f"{strict_retry_reason}"
                                             )
                                             break
 
