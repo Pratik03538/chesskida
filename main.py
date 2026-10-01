@@ -213,6 +213,18 @@ MATE_SUSTAIN_MIN_MOVES = 2
 MATE_SUSTAIN_MAX_MOVES = 3
 MATE_SLOWER_LINE_CHANCE = 0.35
 
+# During the early/normal game, allow a wider human-like selection band so
+# #1/#2 do not dominate simply because all other MultiPV lines are a few
+# centipawns lower. The underlying engine search remains MultiPV=15.
+HUMAN_SELECTION_EXTRA_DROP_CP = 70
+HUMAN_SELECTION_DISTANCE_CP = 80.0
+HUMAN_SELECTION_NON_BEST_CHANCE = 0.88
+
+# In the mating phase, first take genuinely free material when it is safe.
+# Once the opponent has only one non-king piece left, stop cleanup and mate.
+MATE_CLEANUP_MAX_REMAINING_PIECES = 1
+MATE_CLEANUP_MIN_VALUE = 1
+
 _mate_progress_target_mate = None
 _mate_progress_hold_moves = 0
 _mate_progress_hold_limit = 2
@@ -5756,6 +5768,140 @@ def adaptive_accuracy_profile(
     }
 
 
+def find_free_mate_cleanup_capture(board, candidates):
+    """Find a safe capture of free opponent material during mate play.
+
+    A capture qualifies when the target contains a non-king opponent piece,
+    the capturing piece cannot be legally recaptured on the destination
+    square immediately after the capture, and the opponent still has more
+    than one non-king piece overall. Prefer higher-value free material; for
+    equal values prefer a move that is already present in MultiPV.
+    """
+    mover = board.turn
+    candidate_map = {
+        candidate["move"]: candidate
+        for candidate in candidates
+    }
+
+    opponent_material = sum(
+        1
+        for piece in board.piece_map().values()
+        if (
+            piece.color != mover
+            and piece.piece_type != chess.KING
+        )
+    )
+
+    if (
+        opponent_material
+        <= MATE_CLEANUP_MAX_REMAINING_PIECES
+    ):
+        return None
+
+    piece_values = {
+        chess.PAWN: 1,
+        chess.KNIGHT: 3,
+        chess.BISHOP: 3,
+        chess.ROOK: 5,
+        chess.QUEEN: 9,
+    }
+
+    captures = []
+
+    for move in board.legal_moves:
+        victim = board.piece_at(
+            move.to_square
+        )
+
+        if victim is None:
+            continue
+
+        if victim.color == mover:
+            continue
+
+        victim_value = piece_values.get(
+            victim.piece_type,
+            0
+        )
+
+        if victim_value < MATE_CLEANUP_MIN_VALUE:
+            continue
+
+        trial = board.copy(
+            stack=False
+        )
+
+        trial.push(move)
+
+        # "Free" means the capturing piece is not immediately capturable
+        # by any legal reply on the destination square.
+        immediately_recapturable = any(
+            reply.to_square == move.to_square
+            for reply in trial.legal_moves
+        )
+
+        if immediately_recapturable:
+            continue
+
+        candidate = candidate_map.get(
+            move
+        )
+
+        captures.append(
+            {
+                "move": move,
+                "victim": victim,
+                "victim_value": victim_value,
+                "candidate": candidate,
+                "rank": (
+                    candidate["rank"]
+                    if candidate is not None
+                    else None
+                ),
+                "cp": (
+                    candidate["cp"]
+                    if candidate is not None
+                    else None
+                ),
+            }
+        )
+
+    if not captures:
+        return None
+
+    max_value = max(
+        item["victim_value"]
+        for item in captures
+    )
+
+    best_value_captures = [
+        item
+        for item in captures
+        if item["victim_value"] == max_value
+    ]
+
+    candidate_captures = [
+        item
+        for item in best_value_captures
+        if item["candidate"] is not None
+    ]
+
+    if candidate_captures:
+        selected = max(
+            candidate_captures,
+            key=lambda item: (
+                item["cp"],
+                -item["rank"]
+            )
+        )
+    else:
+        selected = random.choice(
+            best_value_captures
+        )
+
+    return selected
+
+
 def choose_stockfish_move(
     board,
     multipv_infos,
@@ -5910,6 +6056,65 @@ def choose_stockfish_move(
         and best["mate"] > 0
     ):
         global _mate_progress_target_mate, _mate_progress_hold_moves, _mate_progress_hold_limit
+
+        # During the human-like mating window, clear genuinely free
+        # material first. This is intentionally before the M4 force rule:
+        # if the opponent blunders a queen/rook/minor/pawn and it is safely
+        # capturable, take it before closing the game. When only one
+        # non-king piece remains, proceed with the normal mate plan.
+        if (
+            best["mate"] <= MATE_GRACE_MAX
+            and best["mate"] > 0
+        ):
+            cleanup = find_free_mate_cleanup_capture(
+                board,
+                candidates
+            )
+
+            if cleanup is not None:
+                selected = cleanup["candidate"]
+
+                if selected is None:
+                    selected = {
+                        "move": cleanup["move"],
+                        "info": best["info"],
+                        "rank": None,
+                        "cp": best_cp,
+                        "mate": None,
+                    }
+                else:
+                    selected = dict(
+                        selected
+                    )
+                    selected["move"] = cleanup["move"]
+
+                victim_name = chess.piece_name(
+                    cleanup["victim"].piece_type
+                ).upper()
+
+                rank_text = (
+                    f"#{cleanup['rank'] + 1}"
+                    if cleanup["rank"] is not None
+                    else "FREE"
+                )
+
+                return (
+                    selected["move"],
+                    selected["info"],
+                    {
+                        "rank": cleanup["rank"],
+                        "current_cp": best_cp,
+                        "selected_cp": cleanup["cp"],
+                        "source": "MATE_CLEANUP",
+                        "reason": (
+                            f"MATE CLEANUP | "
+                            f"FREE {victim_name} "
+                            f"TARGET="
+                            f"{chess.square_name(selected['move'].to_square)} "
+                            f"RANK={rank_text}"
+                        )
+                    }
+                )
 
         # M4 or closer: stop humanizing and take the fastest mate immediately.
         if best["mate"] <= MATE_FORCE_FAST_MAX:
@@ -6268,11 +6473,21 @@ def choose_stockfish_move(
                     - HUMAN_ADVANTAGE_PROTECT_BAND_CP
                 )
             )
+        # Keep the original safety floor for winning positions, but in
+        # normal/early play allow a small extra human-like evaluation band.
+        selection_floor_cp = floor_cp
+
+        if not advantage_mode:
+            selection_floor_cp = max(
+                5,
+                floor_cp - HUMAN_SELECTION_EXTRA_DROP_CP
+            )
+
         safe = [
             c
             for c in candidates
             if (
-                c["cp"] >= floor_cp
+                c["cp"] >= selection_floor_cp
                 and c["cp"] > 0
                 and c["rank"] <= adaptive_max_rank
             )
@@ -6289,7 +6504,7 @@ def choose_stockfish_move(
 
         if (
             len(non_best) >= 2
-            and random.random() < 0.72
+            and random.random() < HUMAN_SELECTION_NON_BEST_CHANCE
         ):
             pool = non_best
         else:
@@ -6446,7 +6661,7 @@ def choose_stockfish_move(
                 1.0
                 / (
                     1.0
-                    + distance / 35.0
+                    + distance / HUMAN_SELECTION_DISTANCE_CP
                 )
             )
 
@@ -8156,6 +8371,16 @@ def main():
                                         f"MultiPV={len(multipv_result)}"
                                     )
 
+                                    selection_rank = selection_meta.get(
+                                        "rank"
+                                    )
+
+                                    selection_rank_text = (
+                                        f"#{selection_rank + 1}"
+                                        if selection_rank is not None
+                                        else "FREE"
+                                    )
+
                                     print(
                                         "[TRAINING] "
                                         f"BEST="
@@ -8163,7 +8388,7 @@ def main():
                                         f"SELECTED="
                                         f"{best_move.uci()} "
                                         f"RANK="
-                                        f"#{selection_meta['rank'] + 1}"
+                                        f"{selection_rank_text}"
                                     )
 
                                     print(
