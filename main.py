@@ -5693,6 +5693,8 @@ def adaptive_accuracy_profile(
     opponent_accuracy,
     sample_count
 ):
+    max_rank = TRAINING_MULTI_PV - 1
+
     if (
         opponent_accuracy is None
         or sample_count < OPPONENT_MIN_SAMPLES
@@ -5700,7 +5702,7 @@ def adaptive_accuracy_profile(
         return {
             "opponent_accuracy": opponent_accuracy,
             "target_accuracy": 88.0,
-            "max_rank": 3,
+            "max_rank": max_rank,
             "max_eval_drop": 0.12,
             "state": (
                 f"WARMUP "
@@ -5722,32 +5724,26 @@ def adaptive_accuracy_profile(
     )
 
     if score < 70.0:
-        max_rank = 4
         max_eval_drop = 0.18
         state = "OPPONENT LIGHT"
 
     elif score < 80.0:
-        max_rank = 3
         max_eval_drop = 0.14
         state = "OPPONENT MEDIUM"
 
     elif score < 88.0:
-        max_rank = 2
         max_eval_drop = 0.10
         state = "OPPONENT STRONG"
 
     elif score < ADAPTIVE_STRONG_THRESHOLD:
-        max_rank = 2
         max_eval_drop = 0.075
         state = "OPPONENT VERY STRONG"
 
     elif score < ADAPTIVE_VERY_STRONG_THRESHOLD:
-        max_rank = 1
         max_eval_drop = 0.050
         state = "OPPONENT ELITE"
 
     else:
-        max_rank = 1
         max_eval_drop = 0.035
         state = "OPPONENT EXTREME"
 
@@ -6403,25 +6399,39 @@ def choose_stockfish_move(
 
         if advantage_mode and advantage_growth:
             rank_factors = {
-                0: 4.50,
-                1: 2.35,
-                2: 1.55,
-                3: 1.05,
-                4: 0.70,
-                5: 0.50,
-                6: 0.35,
-                7: 0.25,
+                0: 0.90,
+                1: 0.92,
+                2: 1.00,
+                3: 1.06,
+                4: 1.08,
+                5: 1.08,
+                6: 1.06,
+                7: 1.04,
+                8: 1.02,
+                9: 1.00,
+                10: 0.98,
+                11: 0.96,
+                12: 0.94,
+                13: 0.92,
+                14: 0.90,
             }
         else:
             rank_factors = {
-                0: 0.95,
-                1: 1.20,
-                2: 1.25,
-                3: 1.15,
-                4: 1.00,
-                5: 0.85,
-                6: 0.70,
-                7: 0.55,
+                0: 0.85,
+                1: 0.90,
+                2: 0.98,
+                3: 1.04,
+                4: 1.08,
+                5: 1.10,
+                6: 1.08,
+                7: 1.06,
+                8: 1.04,
+                9: 1.02,
+                10: 1.00,
+                11: 0.98,
+                12: 0.96,
+                13: 0.94,
+                14: 0.92,
             }
 
         weighted = []
@@ -6526,14 +6536,21 @@ def choose_stockfish_move(
         safe = [best]
 
     rank_weights = {
-        0: 5.0,
-        1: 3.8,
-        2: 3.2,
-        3: 2.4,
-        4: 1.8,
-        5: 1.2,
-        6: 0.8,
-        7: 0.5,
+        0: 0.85,
+        1: 0.90,
+        2: 0.98,
+        3: 1.04,
+        4: 1.08,
+        5: 1.10,
+        6: 1.08,
+        7: 1.06,
+        8: 1.04,
+        9: 1.02,
+        10: 1.00,
+        11: 0.98,
+        12: 0.96,
+        13: 0.94,
+        14: 0.92,
     }
 
     weighted = []
