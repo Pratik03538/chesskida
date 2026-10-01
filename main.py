@@ -6575,20 +6575,19 @@ def choose_stockfish_move(
 
         if advantage_mode:
             if advantage_growth:
-                # Progress move: prefer the strongest few safe continuations.
-                # This is what keeps a +6 position actively developing even
-                # when the short evaluation does not move on every turn.
-                progress_pool = [
+                # Progress moves must still feel human-like. Do not collapse
+                # the pool to only the top few centipawn lines: that makes
+                # advantage growth select #1 repeatedly. Keep every safe
+                # MultiPV=15 candidate available and let the fuzzy rank/score
+                # weighting decide among them.
+                growth_pool = [
                     c
                     for c in safe
-                    if c["cp"] >= max(
-                        floor_cp,
-                        advantage_target_cp,
-                        best_cp - 25                    )
+                    if c["cp"] >= floor_cp
                 ]
 
-                if progress_pool:
-                    pool = progress_pool
+                if growth_pool:
+                    pool = growth_pool
                 else:
                     pool = safe
             else:
@@ -6614,21 +6613,21 @@ def choose_stockfish_move(
 
         if advantage_mode and advantage_growth:
             rank_factors = {
-                0: 0.90,
-                1: 0.92,
-                2: 1.00,
-                3: 1.06,
-                4: 1.08,
-                5: 1.08,
-                6: 1.06,
-                7: 1.04,
-                8: 1.02,
-                9: 1.00,
-                10: 0.98,
-                11: 0.96,
-                12: 0.94,
-                13: 0.92,
-                14: 0.90,
+                0: 0.70,
+                1: 0.78,
+                2: 0.92,
+                3: 1.02,
+                4: 1.10,
+                5: 1.12,
+                6: 1.12,
+                7: 1.10,
+                8: 1.08,
+                9: 1.06,
+                10: 1.04,
+                11: 1.02,
+                12: 1.00,
+                13: 0.98,
+                14: 0.96,
             }
         else:
             rank_factors = {
@@ -6661,7 +6660,14 @@ def choose_stockfish_move(
                 1.0
                 / (
                     1.0
-                    + distance / HUMAN_SELECTION_DISTANCE_CP
+                    + distance / (
+                        HUMAN_SELECTION_DISTANCE_CP
+                        * (
+                            1.35
+                            if advantage_mode
+                            else 1.0
+                        )
+                    )
                 )
             )
 
