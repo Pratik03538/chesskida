@@ -45,12 +45,12 @@ CLICK_HOLD_MAX = 0.0
 # actually selected. This prevents a bad source click (for example selecting
 # a queen when Stockfish asked for a bishop) from turning into a legal but
 # wrong move such as Qxg5 instead of Bxg5.
-BOT_SOURCE_SELECT_TIMEOUT = 0.020
-BOT_SOURCE_SELECT_POLL = 0.0003
+BOT_SOURCE_SELECT_TIMEOUT = 0.012
+BOT_SOURCE_SELECT_POLL = 0.0001
 BOT_SOURCE_SELECT_CHANGE_MIN = 0.0012
 BOT_SOURCE_SELECT_MAX_EXTRA_CHANGES = 0
 BOT_SOURCE_SELECT_DOMINANCE_RATIO = 0.80
-BOT_SOURCE_SELECT_STABLE_SAMPLES = 2
+BOT_SOURCE_SELECT_STABLE_SAMPLES = 1
 
 PROMOTION_WAIT = 0.050
 PROMOTION_RETRIES = 5
@@ -93,7 +93,7 @@ TURN_RESCAN_CONFIRM_DELAY = 0.025
 TURN_RESCAN_MAX_MISMATCH = 0
 TURN_RESCAN_TOP_CANDIDATES = 6
 
-BOT_VERIFY_TIMEOUT = 0.045
+BOT_VERIFY_TIMEOUT = 0.060
 BOT_CONFIRM_SAMPLES = 1
 BOT_CLICK_RETRIES = 2
 BOT_RECOVERY_POLL = 0.0001
@@ -108,7 +108,8 @@ BOT_CONFIRM_GAP = 0.0
 # Bot post-move piece matching can be slightly less strict than the
 # general board scan because the Android/scrcpy frame may contain a
 # transient anti-aliased edge after a tap.
-BOT_POST_MATCH_THRESHOLD = 0.40
+BOT_POST_MATCH_THRESHOLD = 0.48
+HUMAN_POST_MATCH_THRESHOLD = 0.55
 # Full-board verification first trusts the expected python-chess piece
 # on occupied squares, then falls back to the normal scan result.
 # This prevents a single rook/bishop template confusion (for example
@@ -141,6 +142,8 @@ PROMOTION_FALLBACK = True
 FAST_VERIFY_SIZE = 48
 FAST_UNCHANGED_MAX_DIFF = 0.055
 FAST_UNEXPECTED_STRONG_DIFF = 0.085
+FAST_POST_UNEXPECTED_HARD_DIFF = 0.30
+FAST_PRECLICK_HARD_DIFF = 0.30
 FAST_REQUIRED_CHANGED_DIFF = 0.0007
 FAST_MAX_UNEXPECTED_CHANGED_SQUARES = 0
 FAST_DEEP_VERIFY_EVERY = 8
@@ -152,12 +155,12 @@ FAST_DEEP_VERIFY_EVERY = 8
 FAST_POST_CONFIRM_TIMEOUT = 0.018
 FAST_POST_CONFIRM_POLL = 0.0001
 FAST_POST_CONFIRM_GAP = 0.0
-HUMAN_FAST_MAX_TOTAL_TIME = 0.090
+HUMAN_FAST_MAX_TOTAL_TIME = 0.120
 
 # Ultra-fast human move rescan. This uses the same 96x96 vectorized
 # board-motion map as bot verification and checks only the most plausible
 # legal moves instead of running a complete 64-square template scan first.
-HUMAN_FAST_RESCAN_THRESHOLD = 0.00030
+HUMAN_FAST_RESCAN_THRESHOLD = 0.00020
 HUMAN_FAST_RESCAN_TOP_SQUARES = 16
 HUMAN_FAST_RESCAN_TOP_MOVES = 8
 HUMAN_FAST_RESCAN_POLL = 0.0001
@@ -1574,7 +1577,7 @@ def _verify_source_click_selected(
     last_reason = "source selection transition not detected"
 
     while time.perf_counter() < deadline:
-        frame = capture_screen(sct, hwnd)
+        frame = capture_board_roi(sct, hwnd, board_coords)
         if frame is None:
             time.sleep(BOT_SOURCE_SELECT_POLL)
             continue
@@ -1605,7 +1608,7 @@ def _verify_source_click_selected(
 
         dominant_other = other_changes[0][0] if other_changes else 0.0
         source_is_dominant = (
-            source_change >= BOT_SOURCE_SELECT_CHANGE_MIN
+            source_change >= 0.0006
             and dominant_other <= source_change * BOT_SOURCE_SELECT_DOMINANCE_RATIO
         )
 
@@ -2475,9 +2478,9 @@ def fast_human_move_rescan(
                     )
                     return move, trusted_full
 
-                # A different candidate/state may now be visible.
-                if confirm_reason:
-                    break
+                # A different candidate/state may now be visible. Keep testing
+                # the remaining legal candidates instead of abandoning the whole
+                # fast pass on the first transient mismatch.
 
     return None, last_frame
 
@@ -4488,17 +4491,15 @@ def direct_move_state_confirmed(
 def _fast_board_gray(frame, board_coords, size=FAST_VERIFY_SIZE):
     if frame is None:
         return None
-    x, y, w, h = board_coords
-    x1 = max(0, int(x))
-    y1 = max(0, int(y))
-    x2 = min(frame.shape[1], int(x + w))
-    y2 = min(frame.shape[0], int(y + h))
-    if x2 <= x1 or y2 <= y1:
+
+    # Accept either a full scrcpy frame or the board-only ROI. This is critical
+    # for the hot path because the latest pre-click frame is intentionally
+    # captured as ROI to avoid copying the whole scrcpy window.
+    board = _fast_board_view(frame, board_coords)
+    if board is None or board.size == 0:
         return None
-    crop = frame[y1:y2, x1:x2]
-    if crop.size == 0:
-        return None
-    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+
+    gray = cv2.cvtColor(board, cv2.COLOR_BGR2GRAY)
     return cv2.resize(gray, (size, size), interpolation=cv2.INTER_AREA)
 
 
@@ -4613,7 +4614,7 @@ def _fast_expected_post_state_from_map(
         allowed_mask[row, col] = True
 
     outside = visual_scores[~allowed_mask]
-    if outside.size and float(outside.max()) >= FAST_UNEXPECTED_STRONG_DIFF:
+    if outside.size and float(outside.max()) >= FAST_POST_UNEXPECTED_HARD_DIFF:
         flat_index = int(np.argmax(np.where(~allowed_mask, visual_scores, -1.0)))
         row, col = divmod(flat_index, 8)
         if black_perspective:
@@ -4823,49 +4824,25 @@ def fast_preclick_board_confirmed(
     if changes is None:
         return False, "fast board motion map unavailable"
 
-    # Ignore the current source/destination only for the safety preview; on a
-    # true pre-click frame they must still contain the internal pieces below.
-    unexpected = [
-        (sq, value)
-        for sq, value in changes.items()
-        if value >= FAST_UNEXPECTED_STRONG_DIFF
-    ]
-    if unexpected:
-        preview = ', '.join(
-            f"{chess.square_name(sq)}:{value:.3f}"
-            for sq, value in unexpected[:4]
-        )
-        return False, f"physical board changed before click ({preview})"
+    # The reference_frame is already a fully verified physical position.
+    # For the hot path we only need to prove that the screen has not moved
+    # materially since that trusted frame. Do NOT classify the source piece
+    # again here: a transient anti-aliased/animated frame can read a real king
+    # as empty and unnecessarily block a perfectly valid move.
+    max_change = 0.0
+    max_square = None
+    for square, value in changes.items():
+        if value > max_change:
+            max_change = value
+            max_square = square
 
-    templates = get_scaled_templates(
-        board_coords[2] / 8.0, board_coords[3] / 8.0
-    )
-    source_piece = board.piece_at(move.from_square)
-    if source_piece is None:
-        return False, "internal source piece missing"
-    source_crop = get_square_crop(
-        frame, board_coords, move.from_square, black_perspective
-    )
-    source_detected, _ = classify_square(source_crop, templates)
-    if source_detected != source_piece.symbol():
-        return False, f"source mismatch {source_detected or '-'} != {source_piece.symbol()}"
-
-    if board.piece_at(move.to_square) is None:
-        target_crop = get_square_crop(
-            frame, board_coords, move.to_square, black_perspective
+    if max_change >= FAST_PRECLICK_HARD_DIFF:
+        return False, (
+            f"physical board changed before click "
+            f"({chess.square_name(max_square)}:{max_change:.3f})"
         )
-        target_detected, target_score = classify_square(
-            target_crop,
-            templates,
-            match_threshold=EMPTY_DEST_MATCH_THRESHOLD
-        )
-        if target_detected is not None:
-            return False, (
-                f"destination unexpectedly occupied by "
-                f"{target_detected} ({target_score:.3f})"
-            )
 
-    return True, "physical board still matches internal position"
+    return True, "trusted pre-click baseline unchanged"
 
 
 def screen_still_before_move(
@@ -8615,7 +8592,7 @@ def main():
                                         scrcpy_hwnd,
                                         board,
                                         best_move,
-                                        before_frame,
+                                        precheck_frame,
                                         cached_board_coords,
                                         visual_black_perspective
                                     )
@@ -8783,6 +8760,16 @@ def main():
                                         else "[LATENCY] BOT-VERIFIED"
                                     )
                                     last_human_accept_time = None
+
+                                    # The total includes engine + click + physical verification.
+                                    # Keep the detailed stage log so the 300ms target can be
+                                    # measured on the actual scrcpy/PC setup.
+                                    print(
+                                        f"[LATENCY BREAKDOWN] ENGINE={engine_elapsed*1000.0:.1f}ms "
+                                        f"TOTAL={total_from_human_ms:.1f}ms"
+                                        if total_from_human_ms is not None
+                                        else f"[LATENCY BREAKDOWN] ENGINE={engine_elapsed*1000.0:.1f}ms"
+                                    )
 
                                     analysis_state = build_analysis(
                                         engine,
