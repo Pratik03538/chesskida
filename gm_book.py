@@ -45,19 +45,46 @@ class GMBook:
     )
 
     def __init__(self, path: str | os.PathLike[str]):
-        self.path = Path(path)
+        requested = Path(path)
+        self.path = requested
+        self.requested_path = requested
         self.data: Any = None
         self.loaded = False
         self.format = "unloaded"
 
+    def _candidate_paths(self) -> list[Path]:
+        paths = [self.requested_path]
+
+        # The original working project used this exact location. Keep it as
+        # a compatibility fallback so the new chesskida checkout can reuse
+        # the existing Ultimate_GM_Bullet.bin without changing bot logic.
+        legacy = (
+            Path.home()
+            / "PycharmProjects"
+            / "bot pro c"
+            / "Ultimate_GM_Bullet.bin"
+        )
+        if legacy not in paths:
+            paths.append(legacy)
+
+        return paths
+
     def load(self) -> bool:
-        if not self.path.exists():
+        raw = None
+        found_path = None
+
+        for candidate in self._candidate_paths():
+            if candidate.exists() and candidate.is_file():
+                found_path = candidate
+                raw = candidate.read_bytes()
+                break
+
+        if raw is None:
             self.loaded = False
             self.format = "missing"
             return False
 
-        raw = self.path.read_bytes()
-
+        self.path = found_path
         objects = [raw]
 
         for opener, name in (
@@ -100,6 +127,7 @@ class GMBook:
         # FEN variants.
         for value in (
             board.fen(),
+            " ".join(board.fen().split()[:4]),
             board.board_fen(),
         ):
             if value not in keys:
