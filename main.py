@@ -45,7 +45,7 @@ CLICK_HOLD_MAX = 0.0
 # actually selected. This prevents a bad source click (for example selecting
 # a queen when Stockfish asked for a bishop) from turning into a legal but
 # wrong move such as Qxg5 instead of Bxg5.
-BOT_SOURCE_SELECT_TIMEOUT = 0.045
+BOT_SOURCE_SELECT_TIMEOUT = 0.012
 BOT_SOURCE_SELECT_POLL = 0.001
 BOT_SOURCE_SELECT_CHANGE_MIN = 0.0012
 BOT_SOURCE_SELECT_MAX_EXTRA_CHANGES = 0
@@ -1670,11 +1670,15 @@ def click_move(
             sct, scrcpy_hwnd, move, before_frame, board_coords, black_perspective
         )
         if not source_ok:
+            # Source-selection pixels are only a diagnostic signal. Some
+            # chess clients do not render a visible selection/highlight in
+            # scrcpy even when the touch was accepted. Do not block the
+            # destination click here; the exact post-move board verifier is
+            # the authoritative safety gate.
             print(
-                "[BOT CLICK] SOURCE SELECT NOT CONFIRMED | "
-                f"{move.uci()} | {source_reason}"
+                "[BOT CLICK] SOURCE VISUAL NOT CONFIRMED | "
+                f"{move.uci()} | {source_reason} | continuing to target"
             )
-            return False
 
     # Give scrcpy/Android a small separation between source and destination.
     time.sleep(0.012)
