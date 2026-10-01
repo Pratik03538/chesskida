@@ -10614,18 +10614,21 @@ def main():
                         frame
                     )
 
-                    result_action_ui_visible = bool(
-                        match_button_candidates(frame)
-                    )
+                    result_action_ui_visible = False
+                    result_signal = False
 
-                    result_signal = (
-                        screen_change >= MATCH_RESULT_CHANGE_THRESHOLD
-                        and (
-                            obstruction < MATCH_BOARD_VISIBILITY_THRESHOLD
-                            or board.is_game_over()
-                            or result_action_ui_visible
-                        )
-                    )
+                    if screen_change >= MATCH_RESULT_CHANGE_THRESHOLD:
+                        if obstruction < MATCH_BOARD_VISIBILITY_THRESHOLD:
+                            result_signal = True
+                        elif board.is_game_over():
+                            result_signal = True
+                        else:
+                            # Only inspect result controls when a large board
+                            # transition already suggests the screen changed.
+                            result_action_ui_visible = bool(
+                                match_button_candidates(frame)
+                            )
+                            result_signal = result_action_ui_visible
 
                     if result_signal:
                         match_result_streak += 1
