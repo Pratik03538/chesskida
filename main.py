@@ -8780,9 +8780,12 @@ def main():
                                     ):
                                         retry_count += 1
 
-                                        retry_frame = capture_screen(
+                                        # Recovery/verification helpers operate on the
+                                        # board ROI, not the full scrcpy window.
+                                        retry_frame = capture_board_roi(
                                             sct,
-                                            scrcpy_hwnd
+                                            scrcpy_hwnd,
+                                            cached_board_coords
                                         )
                                         fast_recovery = fast_pending_move_recovery(
                                             sct,
