@@ -93,7 +93,11 @@ TURN_RESCAN_CONFIRM_DELAY = 0.025
 TURN_RESCAN_MAX_MISMATCH = 0
 TURN_RESCAN_TOP_CANDIDATES = 6
 
-BOT_VERIFY_TIMEOUT = 0.050
+# Give scrcpy/Android a little more time to render a landed move before
+# considering a second touch. This is still below the visible human-like
+# interaction budget, but avoids retrying a move that landed just after the
+# first verification window.
+BOT_VERIFY_TIMEOUT = 0.090
 BOT_CONFIRM_SAMPLES = 1
 BOT_CLICK_RETRIES = 1
 BOT_RECOVERY_POLL = 0.0001
@@ -153,8 +157,8 @@ FAST_DEEP_VERIFY_EVERY = 8
 # affected-square state check on two consecutive fresh frames. Full-board
 # template scanning remains a recovery/desync authority, never the normal
 # move hot path.
-FAST_POST_CONFIRM_TIMEOUT = 0.018
-FAST_POST_CONFIRM_POLL = 0.0001
+FAST_POST_CONFIRM_TIMEOUT = 0.045
+FAST_POST_CONFIRM_POLL = 0.001
 FAST_POST_CONFIRM_GAP = 0.0
 HUMAN_FAST_MAX_TOTAL_TIME = 0.100
 
@@ -4741,14 +4745,56 @@ def fast_preclick_board_confirmed(
     if source_crop is None:
         return False, "source crop unavailable"
 
+    source_symbol = source_piece.symbol()
+
     detected, score = classify_square(
-        source_crop, templates, expected_symbol=source_piece.symbol(),
+        source_crop, templates, expected_symbol=source_symbol,
         match_threshold=FULL_BOARD_EXPECTED_MATCH_THRESHOLD
     )
-    if detected != source_piece.symbol():
+    if detected != source_symbol:
         return False, (
-            f"source mismatch {detected or '-'} != {source_piece.symbol()} ({score:.3f})"
+            f"source mismatch {detected or '-'} != {source_symbol} ({score:.3f})"
         )
+
+    # IMPORTANT RETRY SAFETY:
+    # expected_symbol-only matching can hallucinate the old piece on an EMPTY
+    # square. This is exactly the failure mode that can cause a move which
+    # already landed to be clicked a second time. Compare the current source
+    # match against the trusted reference source, and only run the more
+    # expensive generic occupancy check when the score has materially worsened.
+    reference_crop = _fast_square_crop(
+        reference_frame,
+        board_coords,
+        move.from_square,
+        black_perspective
+    )
+    if reference_crop is not None:
+        _, reference_score = classify_square(
+            reference_crop,
+            templates,
+            expected_symbol=source_symbol,
+            match_threshold=1.0
+        )
+
+        suspicious_source = (
+            score > 0.10
+            and score > (reference_score + 0.06)
+        )
+
+        if suspicious_source:
+            generic_detected, generic_score = classify_square(
+                source_crop,
+                templates,
+                expected_symbol=None,
+                match_threshold=MATCH_THRESHOLD
+            )
+            if generic_detected != source_symbol:
+                return False, (
+                    f"source appears empty/stale "
+                    f"{source_symbol}: current={score:.3f} "
+                    f"reference={reference_score:.3f} "
+                    f"generic={generic_detected or '-'} ({generic_score:.3f})"
+                )
 
     if board.piece_at(move.to_square) is None:
         target_crop = _fast_square_crop(frame, board_coords, move.to_square, black_perspective)
