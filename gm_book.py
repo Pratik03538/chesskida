@@ -19,45 +19,29 @@ except Exception:
 
 class GMBook:
     """
-    Runtime reader for the Grandmaster/Bullet binary move book.
+    Native Polyglot opening-book reader for Ultimate_GM_Bullet.bin.
 
-    The book is intentionally isolated from the live bot logic:
-      board position -> book candidates -> weighted historical move
-      -> fallback to the existing Stockfish selector when not found.
+    The original 231 MB book is a standard Polyglot binary book:
+      16-byte record = uint64 zobrist key + uint16 move +
+                       uint16 weight + uint32 learn
 
-    The loader accepts the common serialized layouts used by the earlier
-    project: mapping-like books, nested "book"/"positions"/"entries" payloads,
-    move->weight dictionaries, and list/tuple entry records.
+    This keeps book selection independent from the existing chess/vision
+    logic.  The caller can continue using the same weighted-choice result
+    and the same physical click/verification path.
     """
 
-    _MOVE_KEYS = ("move", "uci", "san", "m")
-    _WEIGHT_KEYS = (
-        "weight",
-        "weights",
-        "count",
-        "counts",
-        "frequency",
-        "frequencies",
-        "games",
-        "game_count",
-        "score",
-        "value",
-    )
-
     def __init__(self, path: str | os.PathLike[str]):
-        requested = Path(path)
-        self.path = requested
-        self.requested_path = requested
-        self.data: Any = None
+        self.requested_path = Path(path)
+        self.path = self.requested_path
+        self.reader = None
         self.loaded = False
         self.format = "unloaded"
+        self.entries = 0
 
     def _candidate_paths(self) -> list[Path]:
         paths = [self.requested_path]
 
-        # The original working project used this exact location. Keep it as
-        # a compatibility fallback so the new chesskida checkout can reuse
-        # the existing Ultimate_GM_Bullet.bin without changing bot logic.
+        # Compatibility with the original working project location.
         legacy = (
             Path.home()
             / "PycharmProjects"
@@ -70,260 +54,129 @@ class GMBook:
         return paths
 
     def load(self) -> bool:
-        raw = None
-        found_path = None
+        self.reader = None
+        self.loaded = False
+        self.format = "unloaded"
+        self.entries = 0
 
+        found_path = None
         for candidate in self._candidate_paths():
             if candidate.exists() and candidate.is_file():
                 found_path = candidate
-                raw = candidate.read_bytes()
                 break
 
-        if raw is None:
-            self.loaded = False
+        if found_path is None:
             self.format = "missing"
             return False
 
-        self.path = found_path
-        objects = [raw]
+        try:
+            if chess.polyglot is None:
+                self.format = "polyglot-module-unavailable"
+                return False
 
-        for opener, name in (
-            (gzip.decompress, "gzip"),
-            (bz2.decompress, "bz2"),
-            (lzma.decompress, "lzma"),
-        ):
+            self.path = found_path
+            self.reader = chess.polyglot.open_reader(str(found_path))
+            self.loaded = True
+            self.format = "polyglot"
+
+            # File size is an exact sanity check for the native 16-byte
+            # Polyglot record format. Do not scan the whole 231 MB file here.
             try:
-                objects.append((opener(raw), name))
+                size = self.path.stat().st_size
+                if size % 16 == 0:
+                    self.entries = size // 16
             except Exception:
                 pass
 
-        for payload in objects:
-            if isinstance(payload, tuple):
-                blob, compression = payload
-            else:
-                blob, compression = payload, "raw"
-
-            try:
-                value = pickle.loads(blob)
-            except Exception:
-                continue
-
-            if value is None:
-                continue
-
-            self.data = value
-            self.loaded = True
-            self.format = f"pickle/{compression}"
             return True
+        except Exception:
+            self.reader = None
+            self.loaded = False
+            self.format = "unsupported"
+            return False
 
+    def close(self) -> None:
+        if self.reader is not None:
+            try:
+                self.reader.close()
+            except Exception:
+                pass
+        self.reader = None
         self.loaded = False
-        self.format = "unsupported"
-        return False
 
     @staticmethod
-    def _position_keys(board: chess.Board) -> list[Any]:
-        keys: list[Any] = []
+    def _book_move_to_chess_move(board: chess.Board, entry: Any) -> chess.Move | None:
+        move = getattr(entry, "move", None)
+        if isinstance(move, chess.Move) and move in board.legal_moves:
+            return move
 
-        # FEN variants.
-        for value in (
-            board.fen(),
-            " ".join(board.fen().split()[:4]),
-            board.board_fen(),
-        ):
-            if value not in keys:
-                keys.append(value)
-
-        # Polyglot/Zobrist position key, when python-chess exposes it.
-        try:
-            if chess.polyglot is not None:
-                value = chess.polyglot.zobrist_hash(board)
-                keys.extend((value, str(value), hex(value)))
-        except Exception:
-            pass
-
-        # Older project variants sometimes used python-chess' internal
-        # transposition key directly.
-        try:
-            value = board._transposition_key()
-            keys.extend((value, str(value)))
-        except Exception:
-            pass
-
-        return keys
-
-    @staticmethod
-    def _unwrap(value: Any) -> Any:
-        if isinstance(value, dict):
-            for key in (
-                "moves",
-                "entries",
-                "book",
-                "positions",
-                "data",
-                "table",
-            ):
-                if key in value and isinstance(value[key], (dict, list, tuple)):
-                    # Do not unwrap a plain move->weight dictionary.
-                    keys = set(str(k).lower() for k in value.keys())
-                    if not keys.intersection({"e2e4", "move", "uci", "san"}):
-                        return value[key]
-        return value
-
-    def _lookup_raw(self, board: chess.Board) -> Any:
-        if not isinstance(self.data, dict):
+        raw_move = getattr(entry, "raw_move", None)
+        if raw_move is None:
             return None
 
-        for key in self._position_keys(board):
-            if key in self.data:
-                return self._unwrap(self.data[key])
+        # Polyglot raw_move uses:
+        #   bits 0..5   = destination square
+        #   bits 6..11  = source square
+        #   bits 12..14 = promotion (1=N, 2=B, 3=R, 4=Q)
+        to_square = raw_move & 0x3F
+        from_square = (raw_move >> 6) & 0x3F
+        promotion_code = (raw_move >> 12) & 0x7
 
-            text_key = str(key)
-            if text_key in self.data:
-                return self._unwrap(self.data[text_key])
+        promotion_map = {
+            1: chess.KNIGHT,
+            2: chess.BISHOP,
+            3: chess.ROOK,
+            4: chess.QUEEN,
+        }
+        promotion = promotion_map.get(promotion_code)
 
-        # A small set of nested wrapper layouts.
-        for wrapper in ("book", "positions", "entries", "data", "table"):
-            nested = self.data.get(wrapper)
-            if not isinstance(nested, dict):
-                continue
+        move = chess.Move(
+            from_square=from_square,
+            to_square=to_square,
+            promotion=promotion,
+        )
 
-            for key in self._position_keys(board):
-                if key in nested:
-                    return self._unwrap(nested[key])
-
-                text_key = str(key)
-                if text_key in nested:
-                    return self._unwrap(nested[text_key])
-
-        return None
-
-    @classmethod
-    def _extract_weight(cls, value: Any) -> float:
-        if isinstance(value, (int, float)):
-            return max(0.0, float(value))
-
-        if isinstance(value, dict):
-            for key in cls._WEIGHT_KEYS:
-                if key in value and isinstance(value[key], (int, float)):
-                    return max(0.0, float(value[key]))
-
-        return 1.0
-
-    @classmethod
-    def _extract_move(cls, value: Any) -> Any:
-        if isinstance(value, str):
-            return value
-
-        if isinstance(value, dict):
-            for key in cls._MOVE_KEYS:
-                if key in value:
-                    return value[key]
-
-        if isinstance(value, (tuple, list)) and value:
-            return value[0]
-
-        return None
-
-    @classmethod
-    def _candidate_items(cls, raw: Any) -> list[tuple[Any, float]]:
-        if raw is None:
-            return []
-
-        items: list[tuple[Any, float]] = []
-
-        if isinstance(raw, dict):
-            # Nested record lists.
-            for move, value in raw.items():
-                extracted = cls._extract_move(value)
-                if extracted is None:
-                    extracted = move
-                weight = cls._extract_weight(value)
-                items.append((extracted, weight))
-            return items
-
-        if isinstance(raw, (list, tuple)):
-            for item in raw:
-                if isinstance(item, dict) and not any(
-                    key in item for key in cls._MOVE_KEYS
-                ):
-                    # A dict may itself be {move: weight}.
-                    for move, value in item.items():
-                        extracted = cls._extract_move(value) or move
-                        items.append((extracted, cls._extract_weight(value)))
-                    continue
-
-                move = cls._extract_move(item)
-                if move is None:
-                    continue
-
-                weight = cls._extract_weight(item)
-                if (
-                    isinstance(item, (tuple, list))
-                    and len(item) >= 2
-                    and isinstance(item[1], (int, float))
-                ):
-                    weight = max(0.0, float(item[1]))
-
-                items.append((move, weight))
-
-        return items
+        return move if move in board.legal_moves else None
 
     @staticmethod
-    def _resolve_move(board: chess.Board, value: Any) -> chess.Move | None:
-        if isinstance(value, chess.Move):
-            move = value
-            return move if move in board.legal_moves else None
-
-        if value is None:
-            return None
-
-        text = str(value).strip()
-
-        # UCI first.
+    def _position_key(board: chess.Board) -> int | None:
         try:
-            move = chess.Move.from_uci(text)
-            if move in board.legal_moves:
-                return move
-        except Exception:
-            pass
-
-        # SAN fallback.
-        try:
-            return board.parse_san(text)
+            return chess.polyglot.zobrist_hash(board)
         except Exception:
             return None
 
     def choose(self, board: chess.Board) -> dict[str, Any] | None:
-        if not self.loaded:
+        if not self.loaded or self.reader is None:
             return None
 
-        raw = self._lookup_raw(board)
-        if raw is None:
-            return None
-
-        raw_items = self._candidate_items(raw)
-        if not raw_items:
+        key = self._position_key(board)
+        if key is None:
             return None
 
         candidates: list[dict[str, Any]] = []
 
-        for value, weight in raw_items:
-            move = self._resolve_move(board, value)
-            if move is None:
-                continue
+        try:
+            # find_all() is the important part here: Polyglot books commonly
+            # contain several records with the same position key.
+            for entry in self.reader.find_all(board):
+                move = self._book_move_to_chess_move(board, entry)
+                if move is None:
+                    continue
 
-            candidates.append(
-                {
-                    "move": move,
-                    "weight": max(0.0, float(weight)),
-                    "source": value,
-                }
-            )
+                candidates.append(
+                    {
+                        "move": move,
+                        "weight": max(0.0, float(getattr(entry, "weight", 0))),
+                        "learn": getattr(entry, "learn", 0),
+                    }
+                )
+        except Exception:
+            return None
 
         if not candidates:
             return None
 
-        # Merge duplicate moves while preserving the book's total weight.
+        # Merge duplicate legal moves if the binary contains repeated records.
         merged: dict[str, dict[str, Any]] = {}
         for item in candidates:
             uci = item["move"].uci()
@@ -334,27 +187,26 @@ class GMBook:
 
         candidates = list(merged.values())
 
-        # Historical frequency/weight rank is only diagnostic; selection is
-        # genuinely weighted, matching the earlier "weighted choice" behavior.
+        # Historical book behavior was frequency/weight based, not
+        # "always play Polyglot record #1".
         candidates.sort(
             key=lambda item: (-item["weight"], item["move"].uci())
         )
 
         weights = [item["weight"] for item in candidates]
 
-        if sum(weights) <= 0.0:
-            selected = random.choice(candidates)
-        else:
+        if sum(weights) > 0.0:
             selected = random.choices(
                 candidates,
                 weights=weights,
                 k=1,
             )[0]
+        else:
+            selected = random.choice(candidates)
 
         selected_rank = (
             next(
-                index
-                for index, item in enumerate(candidates)
+                i for i, item in enumerate(candidates)
                 if item["move"] == selected["move"]
             )
             + 1
