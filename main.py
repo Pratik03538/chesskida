@@ -529,36 +529,62 @@ def match_button_candidates(frame):
 
 def result_action_buttons_present(frame):
     """
-    A RESULT SCREEN is valid only when BOTH actual action buttons are visible.
+    Validate the actual Result page from the known Rematch/New button row.
 
-    Screen movement, notifications, calls, banners, keyboard popups, etc. are
-    never sufficient on their own. This helper deliberately checks the two
-    known button footprints from the supplied result-page screenshot.
+    Do NOT require generic contour candidates here. The supplied result-page
+    screenshot shows the buttons at a stable normalized position, and generic
+    contour detection was rejecting the real page. A large screen change is
+    never enough by itself: both button footprints must independently look like
+    the dark rounded action controls.
     """
     if frame is None:
         return False
 
-    candidates = match_button_candidates(frame)
+    height, width = frame.shape[:2]
 
-    if len(candidates) < 2:
+    if height < 120 or width < 240:
         return False
 
-    rematch_score = _match_action_visual_score(
+    left_score = _match_action_visual_score(
         frame,
         MATCH_REMATCH_CENTER_X,
         MATCH_ACTION_CENTER_Y
     )
 
-    new_score = _match_action_visual_score(
+    right_score = _match_action_visual_score(
         frame,
         MATCH_NEW_CENTER_X,
         MATCH_ACTION_CENTER_Y
     )
 
-    return (
-        rematch_score >= MATCH_ACTION_DARK_FRACTION_MIN
-        and new_score >= MATCH_ACTION_DARK_FRACTION_MIN
+    # Both real controls are dark gray panels occupying most of their
+    # footprints. Also require the two scores to be reasonably similar;
+    # this helps reject a notification/overlay that happens to cover only
+    # one side of the screen.
+    pair_similarity = min(
+        left_score,
+        right_score
+    ) / max(
+        0.001,
+        max(left_score, right_score)
     )
+
+    valid = (
+        left_score >= MATCH_ACTION_DARK_FRACTION_MIN
+        and right_score >= MATCH_ACTION_DARK_FRACTION_MIN
+        and pair_similarity >= 0.72
+    )
+
+    if valid:
+        print(
+            "[MATCH] Result buttons PRESENT | "
+            f"Rematch={left_score:.3f} "
+            f"New={right_score:.3f} "
+            f"pair={pair_similarity:.3f}"
+        )
+
+    return valid
+
 
 
 def _match_action_visual_score(
@@ -567,11 +593,7 @@ def _match_action_visual_score(
     center_y_norm
 ):
     """
-    Check the known result-button footprint before allowing a click.
-
-    This is intentionally based on the actual UI geometry from the supplied
-    result screenshot rather than generic contour detection. It prevents
-    player cards/text from being mistaken for the action buttons.
+    Score one known result-button footprint.
     """
     if frame is None:
         return 0.0
@@ -592,19 +614,98 @@ def _match_action_visual_score(
     if x2 <= x1 or y2 <= y1:
         return 0.0
 
-    gray = cv2.cvtColor(
-        frame[y1:y2, x1:x2],
+    crop = frame[y1:y2, :]
+    local = frame[y1:y2, x1:x2]
+
+    gray_local = cv2.cvtColor(
+        local,
         cv2.COLOR_BGR2GRAY
     )
 
-    # The actual button body is predominantly dark gray. White text and
-    # anti-aliased rounded corners account for the remaining pixels.
-    return float(
+    # Actual button panel is approximately 49-65 gray in the supplied
+    # screenshot, while the surrounding result background is about 36-40.
+    dark_fraction = float(
         np.mean(
-            (gray >= 35)
-            & (gray <= 95)
+            (gray_local >= 35)
+            & (gray_local <= 95)
         )
     )
+
+    # Estimate immediate outside-background from strips just above/below the
+    # button. This is more robust than a single absolute color threshold.
+    strip_h = max(
+        4,
+        int(half_h * 0.30)
+    )
+
+    top_y1 = max(
+        0,
+        y1 - strip_h
+    )
+    top_y2 = y1
+
+    bottom_y1 = y2
+    bottom_y2 = min(
+        height,
+        y2 + strip_h
+    )
+
+    outside_parts = []
+
+    if top_y2 > top_y1:
+        outside_parts.append(
+            cv2.cvtColor(
+                frame[top_y1:top_y2, x1:x2],
+                cv2.COLOR_BGR2GRAY
+            )
+        )
+
+    if bottom_y2 > bottom_y1:
+        outside_parts.append(
+            cv2.cvtColor(
+                frame[bottom_y1:bottom_y2, x1:x2],
+                cv2.COLOR_BGR2GRAY
+            )
+        )
+
+    if outside_parts:
+        outside_mean = float(
+            np.mean(
+                np.concatenate(
+                    [
+                        part.reshape(-1)
+                        for part in outside_parts
+                    ]
+                )
+            )
+        )
+    else:
+        outside_mean = 0.0
+
+    inside_mean = float(
+        np.mean(
+            gray_local
+        )
+    )
+
+    contrast = max(
+        0.0,
+        inside_mean - outside_mean
+    )
+
+    # On the supplied result screenshot the button panel is visibly brighter
+    # than the surrounding dark result background. Normalize contrast into
+    # [0,1] and combine with fill coverage.
+    contrast_score = min(
+        1.0,
+        contrast / 12.0
+    )
+
+    return float(
+        0.75 * dark_fraction
+        + 0.25 * contrast_score
+    )
+
 
 
 def match_action_points(frame, action):
