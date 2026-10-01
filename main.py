@@ -45,8 +45,8 @@ CLICK_HOLD_MAX = 0.0
 # actually selected. This prevents a bad source click (for example selecting
 # a queen when Stockfish asked for a bishop) from turning into a legal but
 # wrong move such as Qxg5 instead of Bxg5.
-BOT_SOURCE_SELECT_TIMEOUT = 0.025
-BOT_SOURCE_SELECT_POLL = 0.0001
+BOT_SOURCE_SELECT_TIMEOUT = 0.045
+BOT_SOURCE_SELECT_POLL = 0.001
 BOT_SOURCE_SELECT_CHANGE_MIN = 0.0012
 BOT_SOURCE_SELECT_MAX_EXTRA_CHANGES = 0
 BOT_SOURCE_SELECT_DOMINANCE_RATIO = 0.80
@@ -997,8 +997,7 @@ def square_change_score(
         black_perspective
     )
 
-    after_gray = _get_cached_square_gray(
-        after_frame,
+    after_gray = _get_cached_square_gray(        after_frame,
         board_coords,
         square,
         black_perspective
@@ -1548,6 +1547,44 @@ def select_promotion_piece(
     return False
 
 
+def _source_selection_visual_change(
+    before_frame, after_frame, board_coords, square, black_perspective
+):
+    """Measure very small source-selection/highlight changes robustly."""
+    before_crop = _fast_square_crop(
+        before_frame, board_coords, square, black_perspective
+    )
+    after_crop = _fast_square_crop(
+        after_frame, board_coords, square, black_perspective
+    )
+
+    if before_crop is None or after_crop is None:
+        return 0.0
+
+    try:
+        target_size = (32, 32)
+        b = cv2.resize(before_crop, target_size, interpolation=cv2.INTER_AREA)
+        a = cv2.resize(after_crop, target_size, interpolation=cv2.INTER_AREA)
+        bg = cv2.cvtColor(b, cv2.COLOR_BGR2GRAY)
+        ag = cv2.cvtColor(a, cv2.COLOR_BGR2GRAY)
+        diff = cv2.absdiff(bg, ag)
+
+        mean_change = float(np.mean(diff)) / 255.0
+        p95_change = float(np.percentile(diff, 95)) / 255.0
+        active_ratio = float(np.mean(diff >= 4.0))
+
+        # Selection outlines/highlights may affect only a thin border, so a
+        # plain mean-only test can miss a valid click. Keep this metric
+        # source-square-only; it does not authorise the destination click.
+        return max(
+            mean_change,
+            p95_change * 0.20,
+            active_ratio * 0.25
+        )
+    except Exception:
+        return 0.0
+
+
 def _verify_source_click_selected(
     sct, hwnd, move, before_frame, board_coords, black_perspective
 ):
@@ -1557,25 +1594,43 @@ def _verify_source_click_selected(
 
     deadline = time.perf_counter() + BOT_SOURCE_SELECT_TIMEOUT
     source_square = move.from_square
+    last_reason = "source selection transition not detected"
 
     while time.perf_counter() < deadline:
         frame = capture_board_roi(sct, hwnd, board_coords)
         if frame is None:
+            time.sleep(BOT_SOURCE_SELECT_POLL)
             continue
+
         changes = fast_square_motion_scores(
             before_frame, frame, board_coords, black_perspective
         )
-        if changes is None:
-            continue
-        source_change = changes.get(source_square, 0.0)
-        if source_change >= 0.0006:
+
+        map_change = (
+            changes.get(source_square, 0.0)
+            if changes is not None
+            else 0.0
+        )
+        robust_change = _source_selection_visual_change(
+            before_frame, frame, board_coords, source_square, black_perspective
+        )
+
+        if (
+            map_change >= BOT_SOURCE_SELECT_CHANGE_MIN
+            or robust_change >= 0.00035
+        ):
             return True, (
                 f"source selected {chess.square_name(source_square)} "
-                f"change={source_change:.4f}"
+                f"map={map_change:.4f} robust={robust_change:.4f}"
             )
+
+        last_reason = (
+            f"source change too weak: map={map_change:.4f} "
+            f"robust={robust_change:.4f}"
+        )
         time.sleep(BOT_SOURCE_SELECT_POLL)
 
-    return False, "source selection transition not detected"
+    return False, last_reason
 
 
 
@@ -1597,9 +1652,17 @@ def click_move(
 
     print(f"[BOT CLICK] {move.uci()} source=({sx},{sy}) target=({tx},{ty})")
 
+    # Keep hover/input state away from the board before the next touch.
+    user32.SetCursorPos(0, 0)
+    time.sleep(0.005)
+
+    # Use a real press/hold/release sequence. A 6ms tap was too fragile
+    # through scrcpy on the current setup, so the source registration gets
+    # a small but deliberate hold. This still keeps the complete move fast.
     user32.SetCursorPos(int(sx), int(sy))
+    time.sleep(0.005)
     user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-    time.sleep(0.006)
+    time.sleep(0.020)
     user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
 
     if sct is not None and before_frame is not None:
@@ -1613,11 +1676,13 @@ def click_move(
             )
             return False
 
-    time.sleep(0.003)
+    # Give scrcpy/Android a small separation between source and destination.
+    time.sleep(0.012)
 
     user32.SetCursorPos(int(tx), int(ty))
+    time.sleep(0.005)
     user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-    time.sleep(0.006)
+    time.sleep(0.020)
     user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
 
     if move.promotion is not None:
@@ -1931,7 +1996,6 @@ def move_transition_strength(
 
         values[square] = value
         total += value
-
     if affected:
         minimum = min(
             values.values()
@@ -2931,8 +2995,7 @@ def ultra_board_delta_recovery(
         return None, None
 
     best_total, best_move, best_a, best_b = candidates_a[0]
-    second_total = (
-        candidates_a[1][0]
+    second_total = (        candidates_a[1][0]
         if len(candidates_a) > 1
         else -999.0
     )
@@ -3931,8 +3994,7 @@ def detect_human_move(
                         (
                             f"candidate {best_move.uci()} rejected by "
                             f"physical board check: {physical_reason}"
-                        ),
-                        key="human_physical_reject",
+                        ),                        key="human_physical_reject",
                         force=True
                     )
 
@@ -4931,8 +4993,7 @@ def transition_confirmed(
     )
 
     source_change = changes.get(
-        move.from_square,
-        0.0
+        move.from_square,        0.0
     )
 
     if target_change < TARGET_CHANGE_THRESHOLD:
@@ -5931,8 +5992,7 @@ def choose_stockfish_move(
             "rank": rank,
             "move": move,
             "info": info,
-            "cp": int(cp),
-            "mate": pov_score.mate(),
+            "cp": int(cp),            "mate": pov_score.mate(),
         })
 
     if not candidates:
@@ -6931,8 +6991,7 @@ def draw_overlay(
 
     bottom_color = (
         "BLACK"
-        if stockfish_color == chess.BLACK
-        else "WHITE"
+        if stockfish_color == chess.BLACK        else "WHITE"
     )
 
     top_color = (
@@ -7931,8 +7990,7 @@ def main():
                                 opponent_pressure = not bool(exact_top_match)
 
                                 print(
-                                    f"[OPPONENT] "
-                                    f"move={move.uci()} "
+                                    f"[OPPONENT] "                                    f"move={move.uci()} "
                                     f"expected=#1="
                                     f"{expected_human_uci} "
                                     f"TOP_MATCH="
@@ -8931,8 +8989,7 @@ def main():
                             "STATE",
                             current_status,
                             key="state",
-                            force=True
-                        )
+                            force=True                        )
 
                         last_wait_status = current_status
                         last_wait_report = now
