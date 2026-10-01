@@ -1003,6 +1003,12 @@ def draw_move_history_panel(display_frame, board, board_coords):
 
 MATCH_BOARD_VISIBILITY_THRESHOLD = 0.30
 MATCH_BOARD_OBSTRUCTION_CHANGE = 0.050
+
+# Direct old-game -> new-game recovery without requiring a result screen.
+# A fresh board reset changes many squares at once; normal chess moves do not.
+MATCH_NEW_GAME_RESET_CHANGED_SQUARES = 8
+MATCH_NEW_GAME_RESET_CHANGE_MIN = 0.050
+
 MATCH_NEW_GAME_CHECK_INTERVAL = 0.10
 MATCH_NEW_GAME_MIN_EXACT = 58
 MATCH_NEW_GAME_CONFIRM_DELAY = 0.0
@@ -9029,7 +9035,70 @@ def main():
                             cached_board_grid = locked_grid
                             baseline_frame = locked_frame
 
-                            if human_color == chess.WHITE:
+                            startup_new_game = None
+
+                            # Do not assume that locking the grid means a
+                            # match exists. A game may start later, so probe
+                            # the actual board for START or START+White move.
+                            if len(board.move_stack) == 0:
+                                startup_new_game = detect_new_game_state(
+                                    sct,
+                                    scrcpy_hwnd,
+                                    cached_board_coords,
+                                    source_frame=locked_frame
+                                )
+
+                            if startup_new_game is not None:
+                                board = startup_new_game["board"]
+                                visual_black_perspective = (
+                                    startup_new_game["perspective"]
+                                )
+                                stockfish_color = (
+                                    startup_new_game["stockfish_color"]
+                                )
+                                human_color = (
+                                    startup_new_game["human_color"]
+                                )
+                                cached_board_grid = startup_new_game["grid"]
+                                baseline_frame = startup_new_game["frame"]
+
+                                print(
+                                    "[MATCH] NEW GAME DETECTED AT STARTUP | "
+                                    f"kind={startup_new_game['kind']} "
+                                    f"exact={startup_new_game['exact']}/64"
+                                )
+
+                            elif len(board.move_stack) == 0:
+                                # No match yet. Stay in matchmaking and let the
+                                # fast direct new-game probe pick it up later.
+                                game_ready = False
+                                match_ui["phase"] = "MATCHMAKING"
+                                match_ui["requested_action"] = None
+                                match_ui["screen_guard"] = False
+                                match_ui["result_text"] = (
+                                    "WAITING FOR NEW MATCH..."
+                                )
+                                match_next_scan = time.perf_counter()
+
+                                print(
+                                    "[MATCH] No fresh game yet | "
+                                    "waiting for START or START+WHITE-MOVE"
+                                )
+
+                            if (
+                                startup_new_game is not None
+                                and startup_new_game.get("first_move") is not None
+                            ):
+                                print(
+                                    "[MATCH] WHITE MOVE ALREADY PRESENT | "
+                                    f"{startup_new_game['first_move'].uci()} | synced"
+                                )
+
+                            if (
+                                startup_new_game is None
+                                and len(board.move_stack) != 0
+                                and human_color == chess.WHITE
+                            ):
                                 first_move = detect_existing_white_first_move(
                                     locked_frame,
                                     board,
@@ -9083,12 +9152,21 @@ def main():
                                             f"[SYNC] First move rejected; internal board NOT advanced: {first_move.uci()} | {first_reason}"
                                         )
 
-                            game_ready = True
-                            match_ui["phase"] = "GAME"
-                            match_ui["requested_action"] = None
-                            match_result_streak = 0
-                            match_auto_after = None
-                            analysis_state = None
+                            # Only enter GAME when the startup
+                            # probe found a valid fresh game, or the internal
+                            # board was already beyond the initial position.
+                            if (
+                                startup_new_game is not None
+                                or len(board.move_stack) != 0
+                            ):
+                                game_ready = True
+                                match_ui["phase"] = "GAME"
+                                match_ui["requested_action"] = None
+                                match_result_streak = 0
+                                match_auto_after = None
+                                analysis_state = None
+                            else:
+                                game_ready = False
 
                             opponent_match_history.clear()
                             next_human_best_uci = None
@@ -9338,13 +9416,60 @@ def main():
                         match_ui.get("phase") == "MATCHMAKING"
                     )
 
+                    # Direct new-match recovery while already in GAME.
+                    # This handles: accidental exit -> New game, rematch
+                    # started outside the result-screen flow, or the bot being
+                    # restarted while the app is already on a fresh game.
+                    new_game = None
+
+                    direct_reset_probe = (
+                        recovery_due
+                        and match_ui.get("phase") == "GAME"
+                        and game_ready
+                        and not bot_thinking
+                        and baseline_frame is not None
+                    )
+
+                    if direct_reset_probe:
+                        reset_changes = fast_square_motion_scores(
+                            baseline_frame,
+                            frame,
+                            cached_board_coords,
+                            visual_black_perspective
+                        )
+
+                        if reset_changes is not None:
+                            reset_changed_squares = sum(
+                                1
+                                for value in reset_changes.values()
+                                if value >= MATCH_NEW_GAME_RESET_CHANGE_MIN
+                            )
+
+                            if (
+                                reset_changed_squares
+                                >= MATCH_NEW_GAME_RESET_CHANGED_SQUARES
+                            ):
+                                new_game = detect_new_game_state(
+                                    sct,
+                                    scrcpy_hwnd,
+                                    cached_board_coords,
+                                    source_frame=frame
+                                )
+
+                                if new_game is not None:
+                                    print(
+                                        "[MATCH] DIRECT NEW GAME RESET DETECTED | "
+                                        f"changed={reset_changed_squares}/64"
+                                    )
+
                     recovery_allowed = (
                         matchmaking_phase
                         or not game_ready
                     )
 
                     if (
-                        recovery_due
+                        new_game is None
+                        and recovery_due
                         and recovery_allowed
                         and (
                             matchmaking_phase
