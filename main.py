@@ -962,6 +962,230 @@ def draw_move_history_panel(display_frame, board, board_coords):
 
 
 
+
+MATCH_BOARD_VISIBILITY_THRESHOLD = 0.30
+MATCH_BOARD_OBSTRUCTION_CHANGE = 0.050
+MATCH_NEW_GAME_CHECK_INTERVAL = 0.55
+MATCH_NEW_GAME_MIN_EXACT = 58
+MATCH_NEW_GAME_CONFIRM_DELAY = 0.025
+
+
+def match_board_obstruction_ratio(
+    before_frame,
+    current_frame,
+    board_coords,
+    black_perspective
+):
+    if (
+        before_frame is None
+        or current_frame is None
+        or board_coords is None
+    ):
+        return 0.0
+
+    changes = fast_square_motion_scores(
+        before_frame,
+        current_frame,
+        board_coords,
+        black_perspective
+    )
+
+    if changes is None:
+        return 0.0
+
+    return sum(
+        1
+        for score in changes.values()
+        if score >= MATCH_BOARD_OBSTRUCTION_CHANGE
+    ) / 64.0
+
+
+def _new_game_screen_exact_count(
+    grid,
+    confidence,
+    candidate_board,
+    black_perspective
+):
+    observed = grid_conf_dict(
+        grid,
+        confidence,
+        black_perspective
+    )
+
+    exact = 0
+
+    for square in chess.SQUARES:
+        observed_symbol, _ = observed.get(
+            square,
+            (None, 999.0)
+        )
+
+        piece = candidate_board.piece_at(
+            square
+        )
+
+        expected_symbol = (
+            piece.symbol()
+            if piece is not None
+            else None
+        )
+
+        if observed_symbol == expected_symbol:
+            exact += 1
+
+    return exact
+
+
+def detect_new_game_state(
+    sct,
+    hwnd,
+    board_coords
+):
+    if board_coords is None:
+        return None
+
+    frame = capture_screen(
+        sct,
+        hwnd
+    )
+
+    if frame is None:
+        return None
+
+    grid, confidence, scan_ms = scan_board(
+        frame,
+        board_coords
+    )
+
+    if grid is None:
+        return None
+
+    start_board = chess.Board(
+        INITIAL_FEN
+    )
+
+    perspective = detect_board_orientation(
+        grid,
+        start_board
+    )
+
+    stockfish_color_now = detect_bottom_stockfish_color(
+        perspective
+    )
+
+    human_color_now = (
+        chess.BLACK
+        if stockfish_color_now == chess.WHITE
+        else chess.WHITE
+    )
+
+    candidates = [
+        (
+            0,
+            None,
+            start_board
+        )
+    ]
+
+    # The fresh match may already contain White's first move:
+    # human White or Stockfish White are both accepted here.
+    for move in start_board.legal_moves:
+        candidates.append(
+            (
+                1,
+                move,
+                expected_board_after_move(
+                    start_board,
+                    move
+                )
+            )
+        )
+
+    scored = []
+
+    for kind, first_move, candidate_board in candidates:
+        exact = _new_game_screen_exact_count(
+            grid,
+            confidence,
+            candidate_board,
+            perspective
+        )
+
+        scored.append(
+            (
+                exact,
+                kind,
+                first_move,
+                candidate_board
+            )
+        )
+
+    scored.sort(
+        reverse=True,
+        key=lambda item: (
+            item[0],
+            -item[1]
+        )
+    )
+
+    exact, kind, first_move, candidate_board = scored[0]
+
+    if exact < MATCH_NEW_GAME_MIN_EXACT:
+        return None
+
+    first_ok, first_reason = full_board_state_confirmed(
+        frame,
+        candidate_board,
+        board_coords,
+        perspective
+    )
+
+    if not first_ok:
+        return None
+
+    time.sleep(
+        MATCH_NEW_GAME_CONFIRM_DELAY
+    )
+
+    confirm_frame = capture_screen(
+        sct,
+        hwnd
+    )
+
+    if confirm_frame is None:
+        return None
+
+    second_ok, second_reason = full_board_state_confirmed(
+        confirm_frame,
+        candidate_board,
+        board_coords,
+        perspective
+    )
+
+    if not second_ok:
+        return None
+
+    return {
+        "frame": confirm_frame,
+        "grid": grid,
+        "scan_ms": scan_ms,
+        "perspective": perspective,
+        "stockfish_color": stockfish_color_now,
+        "human_color": human_color_now,
+        "board": candidate_board,
+        "first_move": first_move,
+        "kind": (
+            "START"
+            if kind == 0
+            else "WHITE_MOVE"
+        ),
+        "exact": exact,
+        "reason": (
+            f"{first_reason}; second={second_reason}"
+        )
+    }
+
+
 # Template position guards.
 TEMPLATE_CENTER_TOLERANCE = 0.22
 PAWN_CENTER_TOLERANCE = 0.15
@@ -8553,12 +8777,182 @@ def main():
                             )
                         )
 
-                status = "READY - PRESS R"
-
+                # ============================================================
+                # BOARD VISIBILITY / UNSCHEDULED NEW-GAME RECOVERY
+                # ADD-ONLY: existing move detection remains unchanged.
+                # ============================================================
                 if (
                     grid_locked
                     and cached_board_coords
+                    and match_ui.get("phase") != "IDLE"
                 ):
+                    obstruction = 0.0
+
+                    if baseline_frame is not None:
+                        obstruction = match_board_obstruction_ratio(
+                            baseline_frame,
+                            frame,
+                            cached_board_coords,
+                            visual_black_perspective
+                        )
+
+                    match_ui["board_obstruction"] = obstruction
+
+                    recovery_due = (
+                        time.perf_counter()
+                        >= match_next_scan
+                    )
+
+                    large_hidden = (
+                        obstruction
+                        >= MATCH_BOARD_VISIBILITY_THRESHOLD
+                    )
+
+                    if (
+                        recovery_due
+                        and (
+                            not game_ready
+                            or large_hidden
+                        )
+                    ):
+                        new_game = detect_new_game_state(
+                            sct,
+                            scrcpy_hwnd,
+                            cached_board_coords
+                        )
+
+                        if new_game is not None:
+                            board = new_game["board"]
+
+                            visual_black_perspective = (
+                                new_game["perspective"]
+                            )
+                            stockfish_color = (
+                                new_game["stockfish_color"]
+                            )
+                            human_color = (
+                                new_game["human_color"]
+                            )
+
+                            cached_board_grid = new_game["grid"]
+                            baseline_frame = new_game["frame"]
+
+                            game_ready = True
+                            bot_thinking = False
+                            analysis_state = None
+                            last_bot_position_key = None
+                            pending_bot_moves.clear()
+                            pending_recovered_human = None
+                            next_human_best_uci = None
+                            opponent_pressure = False
+                            opponent_match_history.clear()
+
+                            next_main_turn_rescan = (
+                                time.perf_counter()
+                                + TURN_RESCAN_INTERVAL
+                            )
+
+                            stockfish_moves_since_buffer = 0
+                            next_buffer_after = random.randint(
+                                RANDOM_BUFFER_MOVE_MIN,
+                                RANDOM_BUFFER_MOVE_MAX
+                            )
+
+                            _advantage_progress_target_cp = None
+                            _advantage_progress_hold_moves = 0
+                            _advantage_progress_hold_limit = random.randint(
+                                HUMAN_ADVANTAGE_HOLD_MIN_MOVES,
+                                HUMAN_ADVANTAGE_HOLD_MAX_MOVES
+                            )
+                            _advantage_progress_side = None
+
+                            match_ui["phase"] = "GAME"
+                            match_ui["requested_action"] = None
+                            match_ui["screen_guard"] = False
+                            match_ui["board_obstruction"] = 0.0
+                            match_ui["result_text"] = "WAITING FOR NEW MATCH..."
+                            match_ui["preference"] = {
+                                "best": "-",
+                                "selected": "-",
+                                "rank": "-",
+                                "best_cp": None,
+                                "selected_cp": None,
+                                "reason": "new game detected",
+                            }
+
+                            match_result_streak = 0
+                            match_auto_after = None
+
+                            print(
+                                "[MATCH] UNSCHEDULED NEW GAME DETECTED | "
+                                f"kind={new_game['kind']} "
+                                f"exact={new_game['exact']}/64 "
+                                f"Stockfish="
+                                f"{'WHITE' if stockfish_color == chess.WHITE else 'BLACK'} "
+                                f"| Human="
+                                f"{'WHITE' if human_color == chess.WHITE else 'BLACK'}"
+                            )
+
+                            if new_game.get("first_move") is not None:
+                                first_move = new_game["first_move"]
+
+                                try:
+                                    san = board.san(
+                                        first_move
+                                    )
+                                except Exception:
+                                    san = first_move.uci()
+
+                                print(
+                                    "[MATCH] WHITE MOVE ALREADY PRESENT | "
+                                    f"{first_move.uci()} {san} | synced"
+                                )
+
+                        elif large_hidden:
+                            match_ui["screen_guard"] = True
+                            game_ready = False
+
+                            progress(
+                                "STATE",
+                                (
+                                    "PAUSED - SCREEN HIDDEN | "
+                                    f"{obstruction * 100:.1f}% BOARD HIDDEN | "
+                                    "checking for NEW MATCH"
+                                ),
+                                key="screen_guard",
+                                force=True
+                            )
+
+                        elif match_ui.get("screen_guard"):
+                            visible_ok, _ = full_board_state_confirmed(
+                                frame,
+                                board,
+                                cached_board_coords,
+                                visual_black_perspective
+                            )
+
+                            if visible_ok:
+                                match_ui["screen_guard"] = False
+                                game_ready = True
+
+                                print(
+                                    "[SCREEN GUARD] BOARD VISIBLE AGAIN | "
+                                    "internal position confirmed | continuing"
+                                )
+
+                    match_next_scan = (
+                        time.perf_counter()
+                        + MATCH_NEW_GAME_CHECK_INTERVAL
+                    )
+
+                if match_ui.get("screen_guard"):
+                    status = (
+                        "PAUSED - SCREEN HIDDEN >30% | "
+                        "WAITING FOR BOARD / NEW MATCH"
+                    )
+
+                elif match_ui.get("phase") == "RESULT":
+                    status =
                     if (
                         not game_ready
                         or stockfish_color is None
@@ -10019,10 +10413,6 @@ def main():
                         cached_board_coords
                     )
 
-                    match_ui_draw(
-                        display_frame,
-                        match_ui
-                    )
                 else:
                     cv2.rectangle(
                         display_frame,
@@ -10044,6 +10434,12 @@ def main():
                         (0, 255, 255),
                         2
                     )
+
+                match_ui_draw(
+                    display_frame,
+                    match_ui,
+                    cached_board_coords
+                )
 
                 cv2.imshow(
                     "Chess Vision Tracker",
