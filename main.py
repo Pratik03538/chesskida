@@ -154,6 +154,692 @@ HUMAN_FAST_RESCAN_TOP_SQUARES = 12
 HUMAN_FAST_RESCAN_TOP_MOVES = 6
 HUMAN_FAST_RESCAN_POLL = 0.0007
 HUMAN_FAST_RESCAN_CONFIRM_TIMEOUT = 0.050
+# ============================================================
+# MATCH / RESULT-SCREEN CONTROLS
+# ADD-ONLY: isolated from chess move/engine logic.
+# ============================================================
+MATCH_RESULT_CHANGE_THRESHOLD = 0.55
+MATCH_RESULT_CONFIRM_FRAMES = 2
+MATCH_ACTION_VERIFY_TIMEOUT = 1.20
+MATCH_ACTION_SETTLE_DELAY = 0.08
+MATCH_BUTTON_MIN_CHANGE = 0.010
+MATCH_AUTO_DELAY_MIN = 1.20
+MATCH_AUTO_DELAY_MAX = 3.70
+MATCH_BUTTON_RETRIES = 10
+MATCHMAKING_SCAN_INTERVAL = 0.40
+
+
+def match_ui_mouse_callback(event, x, y, flags, param):
+    if event != cv2.EVENT_LBUTTONUP or param is None:
+        return
+
+    if param.get("phase") != "RESULT":
+        return
+
+    def inside(rect):
+        if rect is None:
+            return False
+        x1, y1, x2, y2 = rect
+        return x1 <= x <= x2 and y1 <= y <= y2
+
+    if inside(param.get("rematch_on_rect")):
+        param["rematch_enabled"] = True
+        param["new_match_enabled"] = False
+        print("[MATCH UI] REMATCH AUTO = ON | NEW MATCH AUTO = OFF")
+        return
+
+    if inside(param.get("rematch_off_rect")):
+        param["rematch_enabled"] = False
+        print("[MATCH UI] REMATCH AUTO = OFF")
+        return
+
+    if inside(param.get("new_match_on_rect")):
+        param["new_match_enabled"] = True
+        param["rematch_enabled"] = False
+        print("[MATCH UI] NEW MATCH AUTO = ON | REMATCH AUTO = OFF")
+        return
+
+    if inside(param.get("new_match_off_rect")):
+        param["new_match_enabled"] = False
+        print("[MATCH UI] NEW MATCH AUTO = OFF")
+        return
+
+
+def match_screen_change_score(before_frame, after_frame):
+    if before_frame is None or after_frame is None:
+        return 0.0
+
+    a = cv2.resize(
+        cv2.cvtColor(before_frame, cv2.COLOR_BGR2GRAY),
+        (64, 64),
+        interpolation=cv2.INTER_AREA
+    )
+    b = cv2.resize(
+        cv2.cvtColor(after_frame, cv2.COLOR_BGR2GRAY),
+        (64, 64),
+        interpolation=cv2.INTER_AREA
+    )
+
+    diff = cv2.absdiff(a, b) / 255.0
+
+    return float(
+        max(
+            np.mean(diff >= 0.18),
+            np.mean(diff) * 2.0
+        )
+    )
+
+
+def match_button_candidates(frame):
+    if frame is None:
+        return []
+
+    height, width = frame.shape[:2]
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 50, 150)
+
+    edges = cv2.morphologyEx(
+        edges,
+        cv2.MORPH_CLOSE,
+        np.ones((3, 13), np.uint8)
+    )
+
+    roi_top = int(height * 0.45)
+
+    contours, _ = cv2.findContours(
+        edges[roi_top:, :],
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    found = []
+
+    for contour in contours:
+        bx, by, bw, bh = cv2.boundingRect(contour)
+        by += roi_top
+
+        if bw < max(55, int(width * 0.10)):
+            continue
+        if bh < max(18, int(height * 0.025)):
+            continue
+        if bw > int(width * 0.55) or bh > int(height * 0.16):
+            continue
+
+        aspect = bw / max(1.0, float(bh))
+
+        if aspect < 1.5 or aspect > 8.0:
+            continue
+        if bw * bh < 800:
+            continue
+
+        found.append(
+            (
+                bx + bw // 2,
+                by + bh // 2,
+                bw,
+                bh,
+                bw * bh
+            )
+        )
+
+    found.sort(
+        key=lambda item: (-item[4], item[1], item[0])
+    )
+
+    result = []
+
+    for item in found:
+        cx, cy, bw, bh, area = item
+
+        if any(
+            abs(cx - ex) < 20 and abs(cy - ey) < 20
+            for ex, ey, _, _, _ in result
+        ):
+            continue
+
+        result.append(item)
+
+    return result[:8]
+
+
+def match_action_points(frame, action):
+    candidates = match_button_candidates(frame)
+
+    if candidates:
+        ordered = sorted(
+            candidates,
+            key=lambda item: item[0]
+        )
+
+        if len(ordered) >= 2:
+            selected = (
+                ordered[0]
+                if action == "REMATCH"
+                else ordered[-1]
+            )
+        else:
+            selected = ordered[0]
+
+        return [
+            (int(selected[0]), int(selected[1]))
+        ]
+
+    height, width = frame.shape[:2]
+
+    if action == "REMATCH":
+        return [
+            (int(width * 0.42), int(height * 0.33)),
+            (int(width * 0.35), int(height * 0.40)),
+            (int(width * 0.50), int(height * 0.40)),
+        ]
+
+    return [
+        (int(width * 0.58), int(height * 0.33)),
+        (int(width * 0.65), int(height * 0.40)),
+        (int(width * 0.50), int(height * 0.48)),
+    ]
+
+
+def _button_local_change_score(before_frame, after_frame, center_x, center_y, radius=28):
+    if before_frame is None or after_frame is None:
+        return 0.0
+
+    height, width = before_frame.shape[:2]
+
+    x1 = max(0, int(center_x) - radius)
+    y1 = max(0, int(center_y) - radius)
+    x2 = min(width, int(center_x) + radius)
+    y2 = min(height, int(center_y) + radius)
+
+    if x2 <= x1 or y2 <= y1:
+        return 0.0
+
+    a = cv2.cvtColor(
+        before_frame[y1:y2, x1:x2],
+        cv2.COLOR_BGR2GRAY
+    )
+    b = cv2.cvtColor(
+        after_frame[y1:y2, x1:x2],
+        cv2.COLOR_BGR2GRAY
+    )
+
+    a = cv2.resize(a, (32, 32), interpolation=cv2.INTER_AREA)
+    b = cv2.resize(b, (32, 32), interpolation=cv2.INTER_AREA)
+
+    return float(
+        np.mean(cv2.absdiff(a, b)) / 255.0
+    )
+
+
+def perform_match_action(sct, hwnd, action):
+    if action not in ("REMATCH", "NEW MATCH"):
+        return False, "invalid match action"
+
+    for attempt in range(1, MATCH_BUTTON_RETRIES + 1):
+        frame_before = capture_screen(sct, hwnd)
+
+        if frame_before is None:
+            time.sleep(0.05)
+            continue
+
+        points = match_action_points(
+            frame_before,
+            action
+        )
+
+        for px, py in points:
+            client_x = 0
+            client_y = 0
+            client_w = frame_before.shape[1]
+            client_h = frame_before.shape[0]
+
+            if hwnd and user32 and user32.IsWindow(hwnd):
+                rect = wintypes.RECT()
+
+                try:
+                    user32.GetClientRect(
+                        hwnd,
+                        ctypes.byref(rect)
+                    )
+
+                    point = wintypes.POINT(
+                        rect.left,
+                        rect.top
+                    )
+
+                    user32.ClientToScreen(
+                        hwnd,
+                        ctypes.byref(point)
+                    )
+
+                    client_x = int(point.x)
+                    client_y = int(point.y)
+                    client_w = int(rect.right - rect.left)
+                    client_h = int(rect.bottom - rect.top)
+
+                except Exception:
+                    pass
+
+            frame_h, frame_w = frame_before.shape[:2]
+
+            screen_x = int(
+                client_x
+                + (px / max(1, frame_w)) * client_w
+            )
+            screen_y = int(
+                client_y
+                + (py / max(1, frame_h)) * client_h
+            )
+
+            print(
+                f"[MATCH] {action} click attempt "
+                f"{attempt}/{MATCH_BUTTON_RETRIES} at "
+                f"({screen_x},{screen_y})"
+            )
+
+            if not focus_scrcpy(hwnd):
+                continue
+
+            left_click_screen(screen_x, screen_y)
+
+            time.sleep(
+                MATCH_ACTION_SETTLE_DELAY
+            )
+
+            deadline = (
+                time.perf_counter()
+                + MATCH_ACTION_VERIFY_TIMEOUT
+            )
+
+            while time.perf_counter() < deadline:
+                after = capture_screen(sct, hwnd)
+
+                if after is None:
+                    time.sleep(0.02)
+                    continue
+
+                local_change = _button_local_change_score(
+                    frame_before,
+                    after,
+                    px,
+                    py
+                )
+                screen_change = match_screen_change_score(
+                    frame_before,
+                    after
+                )
+
+                if (
+                    local_change >= MATCH_BUTTON_MIN_CHANGE
+                    or screen_change >= 0.20
+                ):
+                    print(
+                        f"[MATCH] {action} CLICK CONFIRMED | "
+                        "target button changed and disappeared | "
+                        f"screen_change={screen_change:.3f} "
+                        f"local_change={local_change:.3f}"
+                    )
+                    return True, "button transition confirmed"
+
+                time.sleep(0.02)
+
+            break
+
+        time.sleep(0.05)
+
+    return (
+        False,
+        f"{action} transition not confirmed after "
+        f"{MATCH_BUTTON_RETRIES} attempts"
+    )
+
+
+def match_ui_draw(display_frame, match_ui):
+    if match_ui is None:
+        return
+
+    for key in (
+        "rematch_on_rect",
+        "rematch_off_rect",
+        "new_match_on_rect",
+        "new_match_off_rect"
+    ):
+        match_ui[key] = None
+
+    phase = match_ui.get("phase")
+
+    if phase not in ("RESULT", "AWAIT_RESULT", "MATCHMAKING"):
+        return
+
+    height, width = display_frame.shape[:2]
+
+    panel_w = min(
+        620,
+        max(420, width - 16)
+    )
+    panel_h = 108
+
+    x1 = max(
+        8,
+        width - panel_w - 8
+    )
+    y1 = max(
+        8,
+        height - panel_h - 12
+    )
+    x2 = min(
+        width - 8,
+        x1 + panel_w
+    )
+    y2 = min(
+        height - 8,
+        y1 + panel_h
+    )
+
+    cv2.rectangle(
+        display_frame,
+        (x1, y1),
+        (x2, y2),
+        (20, 20, 20),
+        -1
+    )
+
+    if phase == "MATCHMAKING":
+        cv2.putText(
+            display_frame,
+            "WAITING FOR NEW MATCH...",
+            (x1 + 14, y1 + 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.60,
+            (0, 255, 255),
+            2
+        )
+
+        cv2.putText(
+            display_frame,
+            "Grid locked | scanning for new board",
+            (x1 + 14, y1 + 58),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.40,
+            (255, 255, 255),
+            1
+        )
+
+        return
+
+    cv2.putText(
+        display_frame,
+        match_ui.get(
+            "result_text",
+            "WAITING FOR NEW MATCH..."
+        ),
+        (x1 + 14, y1 + 22),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.43,
+        (0, 255, 255),
+        1
+    )
+
+    auto_action = "OFF"
+
+    if match_ui.get("rematch_enabled"):
+        auto_action = "REMATCH"
+    elif match_ui.get("new_match_enabled"):
+        auto_action = "NEW MATCH"
+
+    cv2.putText(
+        display_frame,
+        f"AUTO ACTION: {auto_action}",
+        (x1 + 14, y1 + 43),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.40,
+        (255, 255, 255),
+        1
+    )
+
+    labels = (
+        ("REMATCH ON", "rematch_on_rect"),
+        ("REMATCH OFF", "rematch_off_rect"),
+        ("NEW MATCH ON", "new_match_on_rect"),
+        ("NEW MATCH OFF", "new_match_off_rect")
+    )
+
+    gap = 7
+    button_h = 25
+    usable_w = x2 - x1 - 28
+    button_w = max(
+        74,
+        int((usable_w - gap * 3) / 4)
+    )
+
+    by = y1 + 63
+
+    for index, (label, rect_key) in enumerate(labels):
+        bx1 = x1 + 14 + index * (button_w + gap)
+        bx2 = min(
+            x2 - 14,
+            bx1 + button_w
+        )
+        by2 = min(
+            y2 - 10,
+            by + button_h
+        )
+
+        match_ui[rect_key] = (
+            bx1,
+            by,
+            bx2,
+            by2
+        )
+
+        active = (
+            (label == "REMATCH ON" and match_ui.get("rematch_enabled"))
+            or
+            (label == "NEW MATCH ON" and match_ui.get("new_match_enabled"))
+        )
+
+        border = (
+            (0, 255, 0)
+            if active
+            else (0, 255, 255)
+        )
+
+        cv2.rectangle(
+            display_frame,
+            (bx1, by),
+            (bx2, by2),
+            (35, 35, 35),
+            -1
+        )
+
+        cv2.rectangle(
+            display_frame,
+            (bx1, by),
+            (bx2, by2),
+            border,
+            2
+        )
+
+        text_size = cv2.getTextSize(
+            label,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.34,
+            1
+        )[0]
+
+        tx = bx1 + max(
+            2,
+            (bx2 - bx1 - text_size[0]) // 2
+        )
+
+        ty = by + max(
+            text_size[1] + 2,
+            ((by2 - by) + text_size[1]) // 2
+        )
+
+        cv2.putText(
+            display_frame,
+            label,
+            (tx, ty),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.34,
+            (255, 255, 255),
+            1
+        )
+
+
+_SCREEN_MOVE_HISTORY_CACHE_KEY = None
+_SCREEN_MOVE_HISTORY_CACHE_LINES = []
+
+
+def move_history_lines_for_screen(board, max_plies=24):
+    global _SCREEN_MOVE_HISTORY_CACHE_KEY
+    global _SCREEN_MOVE_HISTORY_CACHE_LINES
+
+    if board is None:
+        return []
+
+    key = tuple(
+        move.uci()
+        for move in board.move_stack
+    )
+
+    if key == _SCREEN_MOVE_HISTORY_CACHE_KEY:
+        return _SCREEN_MOVE_HISTORY_CACHE_LINES
+
+    temp = chess.Board(
+        INITIAL_FEN
+    )
+
+    rows = []
+
+    for index, move in enumerate(board.move_stack):
+        try:
+            san = temp.san(move)
+        except Exception:
+            san = move.uci()
+
+        if index % 2 == 0:
+            rows.append(
+                f"{index // 2 + 1}. {san}"
+            )
+        else:
+            rows[-1] += f" {san}"
+
+        temp.push(move)
+
+    keep_pairs = max(
+        1,
+        max_plies // 2
+    )
+
+    _SCREEN_MOVE_HISTORY_CACHE_KEY = key
+    _SCREEN_MOVE_HISTORY_CACHE_LINES = rows[-keep_pairs:]
+
+    return _SCREEN_MOVE_HISTORY_CACHE_LINES
+
+
+def draw_move_history_panel(display_frame, board, board_coords):
+    if board is None or board_coords is None:
+        return
+
+    lines = move_history_lines_for_screen(
+        board
+    )
+
+    if not lines:
+        return
+
+    height, width = display_frame.shape[:2]
+    bx, by, bw, bh = board_coords
+
+    panel_w = min(
+        300,
+        max(230, width // 4)
+    )
+    panel_h = min(
+        height - 20,
+        38 + len(lines) * 19
+    )
+
+    panel_x = bx + bw + 10
+
+    if panel_x + panel_w > width - 8:
+        panel_x = max(
+            8,
+            bx - panel_w - 10
+        )
+
+    panel_y = max(
+        54,
+        by
+    )
+
+    if panel_y + panel_h > height - 8:
+        panel_y = max(
+            54,
+            height - panel_h - 8
+        )
+
+    overlay = display_frame.copy()
+
+    cv2.rectangle(
+        overlay,
+        (panel_x, panel_y),
+        (
+            min(width - 8, panel_x + panel_w),
+            min(height - 8, panel_y + panel_h)
+        ),
+        (18, 18, 18),
+        -1
+    )
+
+    display_frame[:] = cv2.addWeighted(
+        overlay,
+        0.82,
+        display_frame,
+        0.18,
+        0
+    )
+
+    cv2.rectangle(
+        display_frame,
+        (panel_x, panel_y),
+        (
+            min(width - 8, panel_x + panel_w),
+            min(height - 8, panel_y + panel_h)
+        ),
+        (0, 255, 255),
+        1
+    )
+
+    cv2.putText(
+        display_frame,
+        "MOVES",
+        (panel_x + 10, panel_y + 20),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.46,
+        (0, 255, 255),
+        1
+    )
+
+    for row_index, line in enumerate(lines):
+        cv2.putText(
+            display_frame,
+            line,
+            (
+                panel_x + 10,
+                panel_y + 40 + row_index * 19
+            ),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.37,
+            (255, 255, 255),
+            1
+        )
+
+
+
 
 
 # Template position guards.
@@ -7232,6 +7918,21 @@ def main():
     analysis_state = None
     last_wait_status = ""
     last_wait_report = 0.0
+    match_ui = {
+        "phase": "IDLE",
+        "requested_action": None,
+        "rematch_enabled": False,
+        "new_match_enabled": True,
+        "rematch_on_rect": None,
+        "rematch_off_rect": None,
+        "new_match_on_rect": None,
+        "new_match_off_rect": None,
+        "result_text": "WAITING FOR NEW MATCH...",
+    }
+
+    match_result_streak = 0
+    match_auto_after = None
+    match_next_scan = time.perf_counter()
 
     stockfish_moves_since_buffer = 0
 
@@ -7245,6 +7946,15 @@ def main():
     opponent_pressure = False
 
     with mss.mss() as sct:
+        cv2.namedWindow(
+            "Chess Vision Tracker"
+        )
+
+        cv2.setMouseCallback(
+            "Chess Vision Tracker",
+            match_ui_mouse_callback,
+            match_ui
+        )
         try:
             while True:
                 key = cv2.waitKey(
@@ -7273,6 +7983,13 @@ def main():
                     continue
 
                 display_frame = frame.copy()
+                if key == ord("m"):
+                    if match_ui.get("phase") == "RESULT":
+                        match_ui["requested_action"] = "REMATCH"
+
+                elif key == ord("n"):
+                    if match_ui.get("phase") == "RESULT":
+                        match_ui["requested_action"] = "NEW MATCH"
 
                 if key == ord("r"):
                     height, width = frame.shape[:2]
@@ -7308,6 +8025,11 @@ def main():
                     game_ready = False
                     baseline_frame = None
                     analysis_state = None
+                    match_ui["phase"] = "IDLE"
+                    match_ui["requested_action"] = None
+                    match_ui["result_text"] = "WAITING FOR NEW MATCH..."
+                    match_result_streak = 0
+                    match_auto_after = None
 
                     opponent_match_history.clear()
 
@@ -7478,6 +8200,10 @@ def main():
                                         )
 
                             game_ready = True
+                            match_ui["phase"] = "GAME"
+                            match_ui["requested_action"] = None
+                            match_result_streak = 0
+                            match_auto_after = None
                             analysis_state = None
 
                             opponent_match_history.clear()
@@ -7654,6 +8380,10 @@ def main():
                         )
 
                         game_ready = True
+                        match_ui["phase"] = "GAME"
+                        match_ui["requested_action"] = None
+                        match_result_streak = 0
+                        match_auto_after = None
 
                         print(
                             "[INFO] Bottom side:",
@@ -8740,6 +9470,346 @@ def main():
                         last_wait_status = current_status
                         last_wait_report = now
 
+                # ============================================================
+                # RESULT SCREEN / MATCHMAKING LIFECYCLE
+                # ADD-ONLY: normal chess move detectors remain unchanged.
+                # ============================================================
+                if (
+                    grid_locked
+                    and cached_board_coords
+                    and baseline_frame is not None
+                    and not bot_thinking
+                    and match_ui.get("phase")
+                    in ("GAME", "AWAIT_RESULT")
+                ):
+                    if board.is_game_over() and match_ui.get("phase") != "RESULT":
+                        game_ready = False
+                        match_ui["phase"] = "AWAIT_RESULT"
+                        match_ui["result_text"] = (
+                            f"GAME OVER | {board.outcome()}"
+                        )
+
+                    screen_change = match_screen_change_score(
+                        baseline_frame,
+                        frame
+                    )
+
+                    if screen_change >= MATCH_RESULT_CHANGE_THRESHOLD:
+                        match_result_streak += 1
+                    else:
+                        match_result_streak = 0
+
+                    if match_result_streak >= MATCH_RESULT_CONFIRM_FRAMES:
+                        if match_ui.get("phase") != "RESULT":
+                            game_ready = False
+                            match_ui["phase"] = "RESULT"
+                            match_ui["requested_action"] = None
+                            match_ui["result_text"] = (
+                                f"GAME OVER | {board.outcome()}"
+                                if board.is_game_over()
+                                else "RESULT SCREEN"
+                            )
+                            match_result_streak = 0
+                            match_auto_after = (
+                                time.perf_counter()
+                                + random.uniform(
+                                    MATCH_AUTO_DELAY_MIN,
+                                    MATCH_AUTO_DELAY_MAX
+                                )
+                            )
+
+                            pending_bot_moves.clear()
+                            last_bot_position_key = None
+                            pending_recovered_human = None
+                            next_human_best_uci = None
+
+                            print(
+                                "[MATCH] Result screen detected | "
+                                f"screen_change={screen_change:.3f}"
+                            )
+                            print(
+                                f"[MATCH] Waiting "
+                                f"{max(0.0, match_auto_after - time.perf_counter()):.3f}s "
+                                "before automatic match action"
+                            )
+
+                if match_ui.get("phase") == "RESULT":
+                    requested_action = match_ui.get("requested_action")
+
+                    if requested_action is None:
+                        if match_ui.get("rematch_enabled"):
+                            requested_action = "REMATCH"
+                        elif match_ui.get("new_match_enabled"):
+                            requested_action = "NEW MATCH"
+
+                    auto_due = (
+                        match_auto_after is None
+                        or time.perf_counter() >= match_auto_after
+                    )
+
+                    manual_request = (
+                        match_ui.get("requested_action")
+                        in ("REMATCH", "NEW MATCH")
+                    )
+
+                    if (
+                        requested_action in ("REMATCH", "NEW MATCH")
+                        and (auto_due or manual_request)
+                    ):
+                        match_ui["requested_action"] = None
+
+                        action_ok, action_reason = perform_match_action(
+                            sct,
+                            scrcpy_hwnd,
+                            requested_action
+                        )
+
+                        if action_ok:
+                            board = chess.Board(
+                                INITIAL_FEN
+                            )
+
+                            clear_runtime_caches()
+
+                            cached_board_grid = None
+                            baseline_frame = None
+                            game_ready = False
+                            bot_thinking = False
+                            stockfish_color = None
+                            human_color = None
+                            visual_black_perspective = False
+                            analysis_state = None
+                            last_bot_position_key = None
+                            pending_bot_moves.clear()
+                            pending_recovered_human = None
+                            next_human_best_uci = None
+                            opponent_pressure = False
+                            opponent_match_history.clear()
+
+                            next_main_turn_rescan = (
+                                time.perf_counter()
+                                + TURN_RESCAN_INTERVAL
+                            )
+
+                            _advantage_progress_target_cp = None
+                            _advantage_progress_hold_moves = 0
+                            _advantage_progress_hold_limit = random.randint(
+                                HUMAN_ADVANTAGE_HOLD_MIN_MOVES,
+                                HUMAN_ADVANTAGE_HOLD_MAX_MOVES
+                            )
+                            _advantage_progress_side = None
+
+                            stockfish_moves_since_buffer = 0
+                            next_buffer_after = random.randint(
+                                RANDOM_BUFFER_MOVE_MIN,
+                                RANDOM_BUFFER_MOVE_MAX
+                            )
+
+                            match_result_streak = 0
+                            match_auto_after = None
+                            match_next_scan = time.perf_counter()
+
+                            match_ui["phase"] = "MATCHMAKING"
+                            match_ui["requested_action"] = None
+                            match_ui["result_text"] = "WAITING FOR NEW MATCH..."
+
+                            print(
+                                f"[MATCH] {requested_action} click CONFIRMED | "
+                                "entering matchmaking"
+                            )
+
+                        else:
+                            print(
+                                f"[MATCH] {requested_action} not confirmed | "
+                                f"{action_reason}"
+                            )
+                            match_auto_after = (
+                                time.perf_counter()
+                                + 0.75
+                            )
+
+                if (
+                    match_ui.get("phase") == "MATCHMAKING"
+                    and grid_locked
+                    and cached_board_coords
+                    and time.perf_counter() >= match_next_scan
+                ):
+                    match_next_scan = (
+                        time.perf_counter()
+                        + MATCHMAKING_SCAN_INTERVAL
+                    )
+
+                    (
+                        fresh_frame,
+                        fresh_grid
+                    ) = stable_initial_scan(
+                        sct,
+                        scrcpy_hwnd,
+                        cached_board_coords
+                    )
+
+                    if (
+                        fresh_frame is not None
+                        and fresh_grid is not None
+                    ):
+                        start_board = chess.Board(
+                            INITIAL_FEN
+                        )
+
+                        fresh_perspective = detect_board_orientation(
+                            fresh_grid,
+                            start_board
+                        )
+
+                        fresh_stockfish_color = detect_bottom_stockfish_color(
+                            fresh_perspective
+                        )
+
+                        fresh_human_color = (
+                            chess.BLACK
+                            if fresh_stockfish_color == chess.WHITE
+                            else chess.WHITE
+                        )
+
+                        start_ok, _ = full_board_state_confirmed(
+                            fresh_frame,
+                            start_board,
+                            cached_board_coords,
+                            fresh_perspective
+                        )
+
+                        first_move = None
+                        first_verified_frame = None
+                        first_ready = start_ok
+
+                        if (
+                            not first_ready
+                            and fresh_human_color == chess.WHITE
+                        ):
+                            first_move = detect_existing_white_first_move(
+                                fresh_frame,
+                                start_board,
+                                cached_board_coords,
+                                fresh_perspective
+                            )
+
+                            if first_move is not None:
+                                expected_first_board = (
+                                    expected_board_after_move(
+                                        start_board,
+                                        first_move
+                                    )
+                                )
+
+                                (
+                                    first_ok,
+                                    first_verified_frame,
+                                    first_reason
+                                ) = verify_human_move_on_screen(
+                                    sct,
+                                    scrcpy_hwnd,
+                                    expected_first_board,
+                                    fresh_frame,
+                                    cached_board_coords,
+                                    fresh_perspective,
+                                    first_move,
+                                    start_board.copy(
+                                        stack=False
+                                    )
+                                )
+
+                                if first_ok:
+                                    first_ready = True
+
+                        if first_ready:
+                            board = start_board
+                            visual_black_perspective = fresh_perspective
+                            stockfish_color = fresh_stockfish_color
+                            human_color = fresh_human_color
+                            cached_board_grid = fresh_grid
+                            baseline_frame = fresh_frame
+                            game_ready = True
+                            bot_thinking = False
+                            analysis_state = None
+                            last_bot_position_key = None
+                            pending_bot_moves.clear()
+                            pending_recovered_human = None
+                            next_human_best_uci = None
+                            opponent_pressure = False
+                            opponent_match_history.clear()
+
+                            next_main_turn_rescan = (
+                                time.perf_counter()
+                                + TURN_RESCAN_INTERVAL
+                            )
+
+                            _advantage_progress_target_cp = None
+                            _advantage_progress_hold_moves = 0
+                            _advantage_progress_hold_limit = random.randint(
+                                HUMAN_ADVANTAGE_HOLD_MIN_MOVES,
+                                HUMAN_ADVANTAGE_HOLD_MAX_MOVES
+                            )
+                            _advantage_progress_side = None
+
+                            stockfish_moves_since_buffer = 0
+                            next_buffer_after = random.randint(
+                                RANDOM_BUFFER_MOVE_MIN,
+                                RANDOM_BUFFER_MOVE_MAX
+                            )
+
+                            match_ui["phase"] = "GAME"
+                            match_ui["requested_action"] = None
+                            match_ui["result_text"] = "WAITING FOR NEW MATCH..."
+                            match_result_streak = 0
+                            match_auto_after = None
+
+                            print(
+                                "[MATCH] NEW GAME READY | "
+                                f"Stockfish="
+                                f"{'WHITE' if stockfish_color == chess.WHITE else 'BLACK'} "
+                                f"| Human="
+                                f"{'WHITE' if human_color == chess.WHITE else 'BLACK'}"
+                            )
+
+                            if (
+                                first_move is not None
+                                and first_verified_frame is not None
+                            ):
+                                san = board.san(first_move)
+                                board.push(first_move)
+                                baseline_frame = first_verified_frame
+
+                                (
+                                    cached_board_grid,
+                                    _,
+                                    last_scan_time_ms
+                                ) = scan_board(
+                                    baseline_frame,
+                                    cached_board_coords
+                                )
+
+                                print(
+                                    "[MATCH] White-human first move already present | "
+                                    f"{first_move.uci()} | internal board synced"
+                                )
+
+                                print(
+                                    "[MATCH] First move SAN="
+                                    f"{san} | next turn="
+                                    f"{'WHITE' if board.turn == chess.WHITE else 'BLACK'}"
+                                    "/"
+                                    f"{'STOCKFISH' if board.turn == stockfish_color else 'HUMAN'}"
+                                )
+
+                if match_ui.get("phase") == "RESULT":
+                    status = "RESULT SCREEN | REMATCH / NEW MATCH AUTO CONTROLS"
+
+                elif match_ui.get("phase") == "AWAIT_RESULT":
+                    status = "WAITING FOR RESULT SCREEN..."
+
+                elif match_ui.get("phase") == "MATCHMAKING":
+                    status = "WAITING FOR NEW MATCH..."
+
                 if cached_board_coords:
                     draw_overlay(
                         display_frame,
@@ -8762,6 +9832,16 @@ def main():
                         analysis_state
                     )
 
+                    draw_move_history_panel(
+                        display_frame,
+                        board,
+                        cached_board_coords
+                    )
+
+                    match_ui_draw(
+                        display_frame,
+                        match_ui
+                    )
                 else:
                     cv2.rectangle(
                         display_frame,
