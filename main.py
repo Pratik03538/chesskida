@@ -8115,9 +8115,9 @@ def main():
                                 if locked_bot_move is None:
                                     locked_bot_move = best_move
 
-                                    pending_bot_moves[
-                                        position_key
-                                    ] = {
+                                pending_bot_moves[
+                                    position_key
+                                ] = {
                                         "uci": best_move.uci(),
                                         "san": best_san,
                                         "result": result,
