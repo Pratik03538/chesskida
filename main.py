@@ -7250,8 +7250,6 @@ def choose_stockfish_move(
         best["mate"] is not None
         and best["mate"] > 0
     ):
-        global _mate_progress_target_mate, _mate_progress_hold_moves, _mate_progress_hold_limit
-
         # During the human-like mating window, clear genuinely free
         # material first. This is intentionally before the M4 force rule:
         # if the opponent blunders a queen/rook/minor/pawn and it is safely
