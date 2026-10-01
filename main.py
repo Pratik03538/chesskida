@@ -1572,7 +1572,7 @@ def click_move(
         int(sx),
         int(sy)
     )
-    time.sleep(0.035)
+    time.sleep(0.020)
     user32.mouse_event(
         MOUSEEVENTF_LEFTDOWN,
         0,
@@ -1580,7 +1580,7 @@ def click_move(
         0,
         0
     )
-    time.sleep(0.030)
+    time.sleep(0.035)
     user32.mouse_event(
         MOUSEEVENTF_LEFTUP,
         0,
@@ -1605,7 +1605,7 @@ def click_move(
         0,
         0
     )
-    time.sleep(0.020)
+    time.sleep(0.030)
     user32.mouse_event(
         MOUSEEVENTF_LEFTUP,
         0,
