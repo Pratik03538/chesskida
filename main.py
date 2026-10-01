@@ -7084,7 +7084,10 @@ def choose_stockfish_move(
         _mate_progress_target_mate = None
         _mate_progress_hold_moves = 0
 
-    opponent_inaccuracy = bool(opponent_pressure)
+    # Do not treat every non-#1 human move as an inaccuracy. The historical
+    # fuzzy selector used a separate quality signal; exact-top-move mismatch
+    # alone was not enough to force the selector into progress mode.
+    opponent_inaccuracy = False
     opponent_severe_mistake = False
 
     if not multipv_infos:
