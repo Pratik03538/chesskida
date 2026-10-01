@@ -3427,6 +3427,7 @@ def detect_human_move(
         fast_move is not None
         and fast_frame is not None
     ):
+        detect_human_move._last_detection_source = "FAST_PHYSICAL"
         return fast_move, fast_frame
 
     while (
@@ -7586,6 +7587,7 @@ def main():
                             detect_human_move._last_detection_source = None
 
                             if detection_source in (
+                                "FAST_PHYSICAL",
                                 "ULTRA_DELTA",
                                 "PERIODIC_FULL_RESCAN"
                             ):
