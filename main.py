@@ -609,63 +609,124 @@ def _match_action_visual_score(
 
 def match_action_points(frame, action):
     """
-    Return the actual Rematch/New button center from the result-screen UI.
+    Return the actual Rematch/New button center.
 
-    No generic candidate and NO arbitrary fallback coordinate are used.
-    The button positions come from the supplied screenshot and are checked
-    visually before a click is permitted.
+    Prefer the detected result-action row from the current frame. The
+    normalized geometry is used only to identify the requested half of that
+    same known row.
     """
     if frame is None:
         return []
 
-    if action == "REMATCH":
-        center_x = MATCH_REMATCH_CENTER_X
-    elif action == "NEW MATCH":
-        center_x = MATCH_NEW_CENTER_X
-    else:
-        return []
-
-    score = _match_action_visual_score(
-        frame,
-        center_x,
-        MATCH_ACTION_CENTER_Y
+    candidates = match_button_candidates(
+        frame
     )
 
-    if score < MATCH_ACTION_DARK_FRACTION_MIN:
-        print(
-            "[MATCH] Button validation failed | "
-            f"action={action} "
-            f"visual_score={score:.3f}"
-        )
-        return []
+    selected = None
 
-    height, width = frame.shape[:2]
+    if len(candidates) >= 2:
+        ordered = sorted(
+            candidates,
+            key=lambda item: item[0]
+        )
+
+        selected = (
+            ordered[0]
+            if action == "REMATCH"
+            else ordered[1]
+            if action == "NEW MATCH"
+            else None
+        )
+
+    if selected is None:
+        if action == "REMATCH":
+            center_x = MATCH_REMATCH_CENTER_X
+        elif action == "NEW MATCH":
+            center_x = MATCH_NEW_CENTER_X
+        else:
+            return []
+
+        score = _match_action_visual_score(
+            frame,
+            center_x,
+            MATCH_ACTION_CENTER_Y
+        )
+
+        if score < MATCH_ACTION_DARK_FRACTION_MIN:
+            print(
+                "[MATCH] Button validation failed | "
+                f"action={action} "
+                f"visual_score={score:.3f}"
+            )
+            return []
+
+        height, width = frame.shape[:2]
+
+        px = int(
+            round(
+                center_x * width
+            )
+        )
+        py = int(
+            round(
+                MATCH_ACTION_CENTER_Y * height
+            )
+        )
+
+        button_w = int(
+            MATCH_ACTION_BOX_HALF_W * 2 * width
+        )
+        button_h = int(
+            MATCH_ACTION_BOX_HALF_H * 2 * height
+        )
+
+        print(
+            "[MATCH] Result button validated by known geometry | "
+            f"action={action} "
+            f"center=({px},{py}) "
+            f"visual_score={score:.3f} "
+            f"frame={width}x{height}"
+        )
+
+        return [
+            (
+                px,
+                py,
+                button_w,
+                button_h,
+                score
+            )
+        ]
 
     px = int(
-        round(
-            center_x * width
-        )
+        selected[0]
     )
     py = int(
-        round(
-            MATCH_ACTION_CENTER_Y * height
-        )
+        selected[1]
+    )
+    button_w = int(
+        selected[2]
+    )
+    button_h = int(
+        selected[3]
+    )
+    score = float(
+        selected[4]
     )
 
     print(
-        "[MATCH] Actual result button validated | "
+        "[MATCH] Actual result button selected | "
         f"action={action} "
         f"center=({px},{py}) "
-        f"visual_score={score:.3f} "
-        f"frame={width}x{height}"
+        f"visual_score={score:.3f}"
     )
 
     return [
         (
             px,
             py,
-            int(MATCH_ACTION_BOX_HALF_W * 2 * width),
-            int(MATCH_ACTION_BOX_HALF_H * 2 * height),
+            button_w,
+            button_h,
             score
         )
     ]
@@ -868,12 +929,50 @@ def perform_match_action(sct, hwnd, action):
                     )
                 )
 
-                if target_confirm >= MATCH_ACTION_LOCAL_CONFIRM_MIN:
+                before_target_score = _match_action_visual_score(
+                    frame_before,
+                    (
+                        MATCH_REMATCH_CENTER_X
+                        if action == "REMATCH"
+                        else MATCH_NEW_CENTER_X
+                    ),
+                    MATCH_ACTION_CENTER_Y
+                )
+
+                after_target_score = _match_action_visual_score(
+                    after,
+                    (
+                        MATCH_REMATCH_CENTER_X
+                        if action == "REMATCH"
+                        else MATCH_NEW_CENTER_X
+                    ),
+                    MATCH_ACTION_CENTER_Y
+                )
+
+                button_pair_after = result_action_buttons_present(
+                    after
+                )
+
+                target_disappeared = (
+                    before_target_score >= MATCH_ACTION_DARK_FRACTION_MIN
+                    and after_target_score
+                    < before_target_score - 0.06
+                )
+
+                if (
+                    target_confirm >= MATCH_ACTION_LOCAL_CONFIRM_MIN
+                    or (
+                        target_disappeared
+                        and not button_pair_after
+                    )
+                ):
                     print(
                         f"[MATCH] {action} CLICK CONFIRMED | "
-                        "actual target region changed | "
+                        "target action changed/disappeared | "
                         f"screen_change={screen_change:.3f} "
-                        f"target_change={target_confirm:.3f}"
+                        f"target_change={target_confirm:.3f} "
+                        f"button_before={before_target_score:.3f} "
+                        f"button_after={after_target_score:.3f}"
                     )
                     return True, "target button transition confirmed"
 
