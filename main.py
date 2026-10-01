@@ -8110,6 +8110,11 @@ def main():
                                             best_move
                                         )
 
+                                # Book moves already have a valid frozen decision.
+                                # Keep the same freeze invariant used by the engine path.
+                                if locked_bot_move is None:
+                                    locked_bot_move = best_move
+
                                     pending_bot_moves[
                                         position_key
                                     ] = {
