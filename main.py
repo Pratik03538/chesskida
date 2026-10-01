@@ -1281,6 +1281,45 @@ MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
 SW_RESTORE = 9
 
+if os.name == "nt":
+    _ULONG_PTR = (
+        ctypes.c_ulonglong
+        if ctypes.sizeof(ctypes.c_void_p) == 8
+        else ctypes.c_ulong
+    )
+
+    class _MOUSEINPUT(ctypes.Structure):
+        _fields_ = [
+            ("dx", wintypes.LONG),
+            ("dy", wintypes.LONG),
+            ("mouseData", wintypes.DWORD),
+            ("dwFlags", wintypes.DWORD),
+            ("time", wintypes.DWORD),
+            ("dwExtraInfo", _ULONG_PTR),
+        ]
+
+    class _INPUT_UNION(ctypes.Union):
+        _fields_ = [
+            ("mi", _MOUSEINPUT),
+        ]
+
+    class _INPUT(ctypes.Structure):
+        _anonymous_ = ("u",)
+        _fields_ = [
+            ("type", wintypes.DWORD),
+            ("u", _INPUT_UNION),
+        ]
+
+    try:
+        user32.SendInput.argtypes = [
+            wintypes.UINT,
+            ctypes.POINTER(_INPUT),
+            ctypes.c_int,
+        ]
+        user32.SendInput.restype = wintypes.UINT
+    except Exception:
+        pass
+
 PIECE_MAP = {
     "white_king.png": "K",
     "white_queen.png": "Q",
@@ -1537,11 +1576,68 @@ def focus_scrcpy(hwnd):
     return False
 
 
-def left_click_screen(x, y):
-    # Direct Win32 dispatch. No artificial cursor/hold sleeps.
+def _sendinput_mouse_flag(flag):
+    if not user32 or os.name != "nt" or "_INPUT" not in globals():
+        return False
+
+    try:
+        inp = _INPUT()
+        inp.type = 0
+        inp.mi.dx = 0
+        inp.mi.dy = 0
+        inp.mi.mouseData = 0
+        inp.mi.dwFlags = int(flag)
+        inp.mi.time = 0
+        inp.mi.dwExtraInfo = 0
+
+        sent = user32.SendInput(
+            1,
+            ctypes.byref(inp),
+            ctypes.sizeof(_INPUT)
+        )
+        return int(sent) == 1
+    except Exception:
+        return False
+
+
+def left_click_screen(x, y, hold_seconds=0.020):
     user32.SetCursorPos(int(x), int(y))
-    user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-    user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+    time.sleep(0.004)
+
+    if _sendinput_mouse_flag(MOUSEEVENTF_LEFTDOWN):
+        time.sleep(max(0.0, float(hold_seconds)))
+
+        if _sendinput_mouse_flag(MOUSEEVENTF_LEFTUP):
+            return True
+
+        try:
+            user32.mouse_event(
+                MOUSEEVENTF_LEFTUP,
+                0,
+                0,
+                0,
+                0
+            )
+        except Exception:
+            pass
+
+        return False
+
+    user32.mouse_event(
+        MOUSEEVENTF_LEFTDOWN,
+        0,
+        0,
+        0,
+        0
+    )
+    time.sleep(max(0.0, float(hold_seconds)))
+    user32.mouse_event(
+        MOUSEEVENTF_LEFTUP,
+        0,
+        0,
+        0,
+        0
+    )
     return True
 
 
@@ -2565,31 +2661,24 @@ def click_move(
     black_perspective,
     scrcpy_hwnd,
     sct=None,
-    promotion_color=None
+    promotion_color=None,
+    before_frame=None
 ):
-    if not focus_scrcpy(
-        scrcpy_hwnd
-    ):
+    if not focus_scrcpy(scrcpy_hwnd):
         print(
             "[BOT ERROR] Could not focus scrcpy window."
         )
-
         return False
 
-    # SPEED OPTIMIZATION:
-    # Only resolve the scrcpy screen origin once for source + target.
     screen_origin = get_scrcpy_screen_origin(
         scrcpy_hwnd
     )
-
     if screen_origin is None:
         print(
             "[BOT ERROR] Could not determine scrcpy screen origin."
         )
         return False
 
-    # Re-sample both pickup and drop points for every click attempt. Every
-    # point remains inside the centered 40%-area circle of its own square.
     sx, sy = square_screen_center(
         move.from_square,
         board_coords,
@@ -2611,63 +2700,54 @@ def click_move(
         f"source=({sx},{sy}) target=({tx},{ty})"
     )
 
-    # Keep the mouse cursor completely away from the chess board between
-    # moves. This prevents it from remaining on the previous source/target.
     user32.SetCursorPos(0, 0)
-    time.sleep(0.008)
 
-    # Select the locked source with a real press/hold/release sequence.
-    # Keep enough dwell for scrcpy/Android to register the touch reliably.
-    user32.SetCursorPos(
-        int(sx),
-        int(sy)
-    )
-    time.sleep(0.017)
-    user32.mouse_event(
-        MOUSEEVENTF_LEFTDOWN,
-        0,
-        0,
-        0,
-        0
-    )
-    time.sleep(0.030)
-    user32.mouse_event(
-        MOUSEEVENTF_LEFTUP,
-        0,
-        0,
-        0,
-        0
-    )
+    if not left_click_screen(
+        sx,
+        sy,
+        hold_seconds=0.020
+    ):
+        print(
+            "[BOT CLICK] SOURCE INPUT DISPATCH FAILED | "
+            f"{move.uci()}"
+        )
+        return False
 
-    time.sleep(0.020)
+    if (
+        sct is not None
+        and before_frame is not None
+    ):
+        source_ok, source_reason = (
+            _verify_source_click_selected(
+                sct,
+                scrcpy_hwnd,
+                move,
+                before_frame,
+                board_coords,
+                black_perspective
+            )
+        )
 
-    # Drop only on the locked destination, again using a real
-    # press/hold/release sequence.
-    user32.SetCursorPos(
-        int(tx),
-        int(ty)
-    )
-    time.sleep(0.017)
-    user32.mouse_event(
-        MOUSEEVENTF_LEFTDOWN,
-        0,
-        0,
-        0,
-        0
-    )
-    time.sleep(0.027)
-    user32.mouse_event(
-        MOUSEEVENTF_LEFTUP,
-        0,
-        0,
-        0,
-        0
-    )
+        if not source_ok:
+            print(
+                "[BOT CLICK] SOURCE VISUAL NOT CONFIRMED | "
+                f"{move.uci()} | {source_reason} | continuing to target"
+            )
 
-    # Immediately park the cursor outside the board. It must not sit on
-    # the old move while the system is waiting for the verified result.
+    time.sleep(0.012)
+
+    if not left_click_screen(
+        tx,
+        ty,
+        hold_seconds=0.020
+    ):
+        print(
+            "[BOT CLICK] TARGET INPUT DISPATCH FAILED | "
+            f"{move.uci()}"
+        )
+        return False
+
     user32.SetCursorPos(0, 0)
-    time.sleep(0.010)
 
     if move.promotion is not None:
         if promotion_color is None:
@@ -2678,10 +2758,9 @@ def click_move(
                 "[PROMOTION ERROR] "
                 "Screen capture context unavailable."
             )
-
             return False
 
-        promotion_ok = select_promotion_piece(
+        return select_promotion_piece(
             sct,
             scrcpy_hwnd,
             move,
@@ -2690,11 +2769,8 @@ def click_move(
             black_perspective
         )
 
-        # After promotion is also completed, keep the cursor off the board.
-        user32.SetCursorPos(0, 0)
-        return promotion_ok
-
     return True
+
 
 def expected_changed_squares(
     board,
@@ -8307,6 +8383,64 @@ def print_game_state(
     print()
 
 
+def verify_existing_white_first_move(
+    sct,
+    hwnd,
+    board,
+    move,
+    frame,
+    board_coords,
+    black_perspective
+):
+    expected_board = expected_board_after_move(
+        board,
+        move
+    )
+
+    current_frame = frame
+    deadline = time.perf_counter() + 0.18
+    last_reason = (
+        "first white move state not yet confirmed"
+    )
+
+    while time.perf_counter() < deadline:
+        if current_frame is not None:
+            full_ok, full_reason = (
+                full_board_state_confirmed(
+                    current_frame,
+                    expected_board,
+                    board_coords,
+                    black_perspective
+                )
+            )
+
+            if full_ok:
+                return (
+                    True,
+                    current_frame,
+                    "direct full-board first-move confirmation"
+                )
+
+            last_reason = full_reason
+
+        current_frame = capture_screen(
+            sct,
+            hwnd
+        )
+
+        if current_frame is None:
+            time.sleep(BOT_RECOVERY_POLL)
+            continue
+
+        time.sleep(BOT_RECOVERY_POLL)
+
+    return (
+        False,
+        frame,
+        last_reason
+    )
+
+
 def detect_existing_white_first_move(
     frame,
     board,
@@ -8787,16 +8921,15 @@ def main():
                                         first_ok,
                                         first_verified_frame,
                                         first_reason
-                                    ) = verify_human_move_on_screen(
-                                        sct,
-                                        scrcpy_hwnd,
-                                        expected_first_board,
-                                        locked_frame,
-                                        cached_board_coords,
-                                        visual_black_perspective,
-                                        first_move,
-                                        board.copy(stack=False)
-                                    )
+                                    ) = verify_existing_white_first_move(
+                                    sct,
+                                    scrcpy_hwnd,
+                                    board,
+                                    first_move,
+                                    locked_frame,
+                                    cached_board_coords,
+                                    visual_black_perspective
+                                )
 
                                     if first_ok:
                                         san = board.san(first_move)
@@ -8955,15 +9088,14 @@ def main():
                                     first_ok,
                                     first_verified_frame,
                                     first_reason
-                                ) = verify_human_move_on_screen(
+                                ) = verify_existing_white_first_move(
                                     sct,
                                     scrcpy_hwnd,
-                                    expected_first_board,
+                                    board,
+                                    first_move,
                                     fresh_frame,
                                     cached_board_coords,
-                                    visual_black_perspective,
-                                    first_move,
-                                    board.copy(stack=False)
+                                    visual_black_perspective
                                 )
 
                                 if first_ok:
@@ -9658,7 +9790,9 @@ def main():
                                     "selection_meta": selection_meta,
                                 }
 
-                                if selection_meta.get("source") == "GM_BOOK":
+                                if pending_entry is not None:
+                                    pass
+                                elif selection_meta.get("source") == "GM_BOOK":
                                     print(
                                         "[BOOK] Book move frozen; "
                                         "existing click/verification path retained."
@@ -10072,7 +10206,8 @@ def main():
                                         visual_black_perspective,
                                         scrcpy_hwnd,
                                         sct=sct,
-                                        promotion_color=board.turn
+                                        promotion_color=board.turn,
+                                        before_frame=before_frame
                                     )
 
                                     if not clicked:
@@ -10221,7 +10356,8 @@ def main():
                                             visual_black_perspective,
                                             scrcpy_hwnd,
                                             sct=sct,
-                                            promotion_color=board.turn
+                                            promotion_color=board.turn,
+                                            before_frame=retry_frame
                                         )
 
                                         if not clicked_retry:
