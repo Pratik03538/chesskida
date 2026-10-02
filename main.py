@@ -10556,7 +10556,6 @@ def main():
                         recovery_due
                         and match_ui.get("phase") == "GAME"
                         and game_ready
-                        and not bot_thinking
                         and baseline_frame is not None
                         and obstruction < MATCH_BOARD_VISIBILITY_THRESHOLD
                         and not match_ui.get("screen_guard")
