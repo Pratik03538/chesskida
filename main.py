@@ -1580,6 +1580,7 @@ MATCH_NEW_GAME_MIN_EXACT = 58
 MATCH_NEW_GAME_MIN_DETECTED_PIECES = 20
 MATCH_NEW_GAME_MAX_DETECTED_PIECES = 40
 MATCH_NEW_GAME_CONFIRM_DELAY = 0.0
+MATCH_ORIENTATION_RECHECK_INTERVAL = 1.0
 
 
 def match_board_obstruction_ratio(
@@ -10010,6 +10011,8 @@ def main():
 
     new_match_start_stable = 0
     new_match_start_key = None
+    new_match_start_seen_at = None
+    next_orientation_recheck = time.perf_counter()
 
     stockfish_moves_since_buffer = 0
 
@@ -12006,6 +12009,82 @@ def main():
                         last_wait_report = now
 
                 # ============================================================
+                # PERIODIC ORIENTATION RECHECK
+                # Re-evaluate which color is physically at the bottom every
+                # second while the board is visible. This catches a new match
+                # that flipped orientation after the previous game.
+                # ============================================================
+                if (
+                    grid_locked
+                    and cached_board_coords
+                    and game_ready
+                    and baseline_frame is not None
+                    and match_ui.get("phase") == "GAME"
+                    and not bot_thinking
+                    and not match_ui.get("screen_guard")
+                    and time.perf_counter() >= next_orientation_recheck
+                ):
+                    next_orientation_recheck = (
+                        time.perf_counter()
+                        + MATCH_ORIENTATION_RECHECK_INTERVAL
+                    )
+
+                    orientation_grid, _, _ = scan_board(
+                        frame,
+                        cached_board_coords
+                    )
+
+                    if orientation_grid is not None:
+                        detected_perspective = detect_board_orientation(
+                            orientation_grid,
+                            board
+                        )
+
+                        if detected_perspective != visual_black_perspective:
+                            confirm_frame = capture_screen(
+                                sct,
+                                scrcpy_hwnd
+                            )
+
+                            confirmed_perspective = None
+
+                            if confirm_frame is not None:
+                                confirm_grid, _, _ = scan_board(
+                                    confirm_frame,
+                                    cached_board_coords
+                                )
+
+                                if confirm_grid is not None:
+                                    confirmed_perspective = detect_board_orientation(
+                                        confirm_grid,
+                                        board
+                                    )
+
+                            if confirmed_perspective == detected_perspective:
+                                visual_black_perspective = (
+                                    detected_perspective
+                                )
+                                stockfish_color = (
+                                    detect_bottom_stockfish_color(
+                                        visual_black_perspective
+                                    )
+                                )
+                                human_color = (
+                                    chess.BLACK
+                                    if stockfish_color == chess.WHITE
+                                    else chess.WHITE
+                                )
+                                cached_board_grid = orientation_grid
+                                baseline_frame = frame
+
+                                print(
+                                    "[ORIENTATION RECHECK] UPDATED | "
+                                    f"bottom={'BLACK' if stockfish_color == chess.BLACK else 'WHITE'} "
+                                    f"| Stockfish={'WHITE' if stockfish_color == chess.WHITE else 'BLACK'} "
+                                    f"| Human={'WHITE' if human_color == chess.WHITE else 'BLACK'}"
+                                )
+
+                # ============================================================
                 # RESULT SCREEN / MATCHMAKING LIFECYCLE
                 # ADD-ONLY: normal chess move detectors remain unchanged.
                 # ============================================================
@@ -12201,6 +12280,8 @@ def main():
                             # new match, even when zero or one move was played.
                             new_match_start_stable = 0
                             new_match_start_key = None
+                            new_match_start_seen_at = None
+                            next_orientation_recheck = time.perf_counter()
 
                             match_ui["phase"] = "MATCHMAKING"
                             match_ui["requested_action"] = None
@@ -12258,20 +12339,37 @@ def main():
                             f"{fresh_game['first_move'].uci() if fresh_game.get('first_move') is not None else '-'}"
                         )
 
+                        now = time.perf_counter()
+
                         if fresh_key == new_match_start_key:
                             new_match_start_stable += 1
                         else:
                             new_match_start_key = fresh_key
                             new_match_start_stable = 1
+                            new_match_start_seen_at = now
+
+                        candidate_age = (
+                            now - new_match_start_seen_at
+                            if new_match_start_seen_at is not None
+                            else 0.0
+                        )
 
                         print(
                             "[MATCH] Fresh game candidate | "
                             f"key={fresh_key} "
                             f"exact={fresh_game['exact']}/64 "
-                            f"stable={new_match_start_stable}/2"
+                            f"stable={new_match_start_stable}/2 "
+                            f"orientation_age={candidate_age:.1f}s"
                         )
 
-                        if new_match_start_stable >= 2:
+                        # Re-check the detected orientation for a full second
+                        # before locking this as the next game. This prevents
+                        # the previous game's orientation from being reused
+                        # during the result->new-match transition.
+                        if (
+                            new_match_start_stable >= 2
+                            and candidate_age >= MATCH_ORIENTATION_RECHECK_INTERVAL
+                        ):
                             board = fresh_game["board"]
                             visual_black_perspective = (
                                 fresh_game["perspective"]
@@ -12354,6 +12452,11 @@ def main():
 
                             new_match_start_stable = 0
                             new_match_start_key = None
+                            new_match_start_seen_at = None
+                            next_orientation_recheck = (
+                                time.perf_counter()
+                                + MATCH_ORIENTATION_RECHECK_INTERVAL
+                            )
 
                 if match_ui.get("phase") == "RESULT":
                     status = "RESULT SCREEN | REMATCH / NEW MATCH AUTO CONTROLS"
