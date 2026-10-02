@@ -59,8 +59,8 @@ BOT_SOURCE_SELECT_MAX_EXTRA_CHANGES = 0
 BOT_SOURCE_SELECT_DOMINANCE_RATIO = 0.80
 BOT_SOURCE_SELECT_STABLE_SAMPLES = 1
 
-PROMOTION_WAIT = 0.050
-PROMOTION_RETRIES = 5
+PROMOTION_WAIT = 0.080
+PROMOTION_RETRIES = 6
 SCAN_INTERVAL = 0.006
 ORIENTATION_TIMEOUT = 1.2
 HUMAN_MOVE_TIMEOUT = 0.35
@@ -3306,6 +3306,60 @@ def find_promotion_choice(
     return None
 
 
+def promotion_menu_screen_center(
+    square,
+    board_coords,
+    black_perspective,
+    hwnd
+):
+    """
+    Promotion-menu buttons occupy the same board-square footprint as the
+    destination-file options. For promotion only, click the exact center of
+    the detected option instead of the normal randomized move point.
+    """
+    origin = get_scrcpy_screen_origin(
+        hwnd
+    )
+
+    if origin is None:
+        raise RuntimeError(
+            "Could not determine scrcpy screen origin."
+        )
+
+    origin_x, origin_y = origin
+    x, y, w, h = board_coords
+
+    sq_w = w / 8.0
+    sq_h = h / 8.0
+
+    file_ = chess.square_file(
+        square
+    )
+    rank_ = chess.square_rank(
+        square
+    )
+
+    if black_perspective:
+        col = 7 - file_
+        row = rank_
+    else:
+        col = file_
+        row = 7 - rank_
+
+    return (
+        int(
+            origin_x
+            + x
+            + (col + 0.5) * sq_w
+        ),
+        int(
+            origin_y
+            + y
+            + (row + 0.5) * sq_h
+        )
+    )
+
+
 def select_promotion_piece(
     sct,
     hwnd,
@@ -3372,12 +3426,19 @@ def select_promotion_piece(
 
             continue
 
-        px, py = square_screen_center(
-            square,
-            board_coords,
-            black_perspective,
-            hwnd
-        )
+        try:
+            px, py = promotion_menu_screen_center(
+                square,
+                board_coords,
+                black_perspective,
+                hwnd
+            )
+        except Exception as exc:
+            print(
+                "[PROMOTION] menu click mapping failed | "
+                f"{exc}"
+            )
+            continue
 
         print(
             f"[PROMOTION] selecting {piece_name}"
@@ -3395,7 +3456,7 @@ def select_promotion_piece(
         # already on the destination square before accepting the promotion.
         promotion_ok = False
         promotion_reason = "promotion state not yet confirmed"
-        promotion_deadline = time.perf_counter() + 0.10
+        promotion_deadline = time.perf_counter() + 0.50
 
         while time.perf_counter() < promotion_deadline:
             check_frame = capture_screen(
@@ -9880,6 +9941,9 @@ def main():
     match_auto_after = None
     match_next_scan = time.perf_counter()
 
+    new_match_start_stable = 0
+    new_match_start_key = None
+
     stockfish_moves_since_buffer = 0
 
     next_buffer_after = random.randint(
@@ -10494,6 +10558,8 @@ def main():
                         and game_ready
                         and not bot_thinking
                         and baseline_frame is not None
+                        and obstruction < MATCH_BOARD_VISIBILITY_THRESHOLD
+                        and not match_ui.get("screen_guard")
                     )
 
                     if direct_reset_probe:
@@ -10540,6 +10606,10 @@ def main():
                         and (
                             matchmaking_phase
                             or large_hidden
+                        )
+                        and not (
+                            large_hidden
+                            and match_ui.get("phase") == "GAME"
                         )
                     ):
                         new_game = detect_new_game_state(
@@ -12058,6 +12128,13 @@ def main():
                             match_result_streak = 0
                             match_auto_after = None
                             match_next_scan = time.perf_counter()
+
+                            # Force a completely fresh board/orientation setup
+                            # after every Rematch/New-Match action. Never carry
+                            # the previous game's orientation or turn into the
+                            # new match, even when zero or one move was played.
+                            new_match_start_stable = 0
+                            new_match_start_key = None
 
                             match_ui["phase"] = "MATCHMAKING"
                             match_ui["requested_action"] = None
