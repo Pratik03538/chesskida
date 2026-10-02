@@ -3731,6 +3731,126 @@ def _verify_source_click_selected(
     return False, last_reason
 
 
+def move_cursor_outside_chessboard(
+    board_coords,
+    scrcpy_hwnd
+):
+    """
+    After a bot move, park the cursor outside the chessboard.
+
+    The cursor is moved only after all mouse-button-up events are complete,
+    so this cannot create a drag/swipe across the board.
+    """
+    if (
+        board_coords is None
+        or not scrcpy_hwnd
+        or not user32
+    ):
+        return
+
+    screen_origin = get_scrcpy_screen_origin(
+        scrcpy_hwnd
+    )
+
+    if screen_origin is None:
+        return
+
+    origin_x, origin_y = screen_origin
+    x, y, w, h = board_coords
+
+    try:
+        client_rect = wintypes.RECT()
+
+        if user32.GetClientRect(
+            scrcpy_hwnd,
+            ctypes.byref(client_rect)
+        ):
+            client_w = int(client_rect.right - client_rect.left)
+            client_h = int(client_rect.bottom - client_rect.top)
+        else:
+            client_w = 0
+            client_h = 0
+    except Exception:
+        client_w = 0
+        client_h = 0
+
+    margin = 18
+
+    candidates = [
+        (
+            int(x + w * 0.5),
+            int(y - margin)
+        ),
+        (
+            int(x + w * 0.5),
+            int(y + h + margin)
+        ),
+        (
+            int(x - margin),
+            int(y + h * 0.5)
+        ),
+        (
+            int(x + w + margin),
+            int(y + h * 0.5)
+        )
+    ]
+
+    selected = None
+
+    for px, py in candidates:
+        if (
+            px < x
+            or px > x + w
+            or py < y
+            or py > y + h
+        ):
+            if (
+                client_w <= 0
+                or client_h <= 0
+                or (
+                    0 <= px < client_w
+                    and 0 <= py < client_h
+                )
+            ):
+                selected = (
+                    origin_x + px,
+                    origin_y + py
+                )
+                break
+
+    if selected is None:
+        selected = (
+            origin_x + int(x + w + margin),
+            origin_y + int(y + h * 0.5)
+        )
+
+    try:
+        _sendinput_mouse_flag(
+            MOUSEEVENTF_LEFTUP
+        )
+    except Exception:
+        pass
+
+    try:
+        user32.mouse_event(
+            MOUSEEVENTF_LEFTUP,
+            0,
+            0,
+            0,
+            0
+        )
+    except Exception:
+        pass
+
+    try:
+        user32.SetCursorPos(
+            int(selected[0]),
+            int(selected[1])
+        )
+    except Exception:
+        pass
+
+
 def click_move(
     move,
     board_coords,
@@ -3832,7 +3952,7 @@ def click_move(
             )
             return False
 
-        return select_promotion_piece(
+        promotion_ok = select_promotion_piece(
             sct,
             scrcpy_hwnd,
             move,
@@ -3840,6 +3960,19 @@ def click_move(
             board_coords,
             black_perspective
         )
+
+        if promotion_ok:
+            move_cursor_outside_chessboard(
+                board_coords,
+                scrcpy_hwnd
+            )
+
+        return promotion_ok
+
+    move_cursor_outside_chessboard(
+        board_coords,
+        scrcpy_hwnd
+    )
 
     return True
 
