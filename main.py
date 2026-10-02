@@ -2544,44 +2544,115 @@ def _sendinput_mouse_flag(flag):
 
 
 def left_click_screen(x, y, hold_seconds=0.020):
-    user32.SetCursorPos(int(x), int(y))
-    time.sleep(0.004)
+    """
+    Perform one isolated click.
 
-    if _sendinput_mouse_flag(MOUSEEVENTF_LEFTDOWN):
-        time.sleep(max(0.0, float(hold_seconds)))
+    Always release any previously stuck left button BEFORE moving the cursor,
+    then move to the intended point, press and release at the same point, and
+    never move the cursor while the left button is held. This prevents an
+    accidental drag/swipe and keeps the cursor from jumping to (0, 0).
+    """
+    # Clear a possible stale LEFTDOWN first. This is the important guard
+    # against a previous missed LEFTUP turning the next cursor movement into
+    # a screen swipe.
+    try:
+        _sendinput_mouse_flag(
+            MOUSEEVENTF_LEFTUP
+        )
+    except Exception:
+        pass
 
-        if _sendinput_mouse_flag(MOUSEEVENTF_LEFTUP):
-            return True
+    try:
+        user32.mouse_event(
+            MOUSEEVENTF_LEFTUP,
+            0,
+            0,
+            0,
+            0
+        )
+    except Exception:
+        pass
 
-        try:
-            user32.mouse_event(
-                MOUSEEVENTF_LEFTUP,
-                0,
-                0,
-                0,
-                0
+    user32.SetCursorPos(
+        int(x),
+        int(y)
+    )
+
+    time.sleep(
+        0.004
+    )
+
+    pressed = False
+
+    try:
+        if _sendinput_mouse_flag(
+            MOUSEEVENTF_LEFTDOWN
+        ):
+            pressed = True
+
+            time.sleep(
+                max(
+                    0.0,
+                    float(hold_seconds)
+                )
             )
-        except Exception:
-            pass
 
-        return False
+            if _sendinput_mouse_flag(
+                MOUSEEVENTF_LEFTUP
+            ):
+                pressed = False
+                return True
 
-    user32.mouse_event(
-        MOUSEEVENTF_LEFTDOWN,
-        0,
-        0,
-        0,
-        0
-    )
-    time.sleep(max(0.0, float(hold_seconds)))
-    user32.mouse_event(
-        MOUSEEVENTF_LEFTUP,
-        0,
-        0,
-        0,
-        0
-    )
-    return True
+            return False
+
+        user32.mouse_event(
+            MOUSEEVENTF_LEFTDOWN,
+            0,
+            0,
+            0,
+            0
+        )
+        pressed = True
+
+        time.sleep(
+            max(
+                0.0,
+                float(hold_seconds)
+            )
+        )
+
+        user32.mouse_event(
+            MOUSEEVENTF_LEFTUP,
+            0,
+            0,
+            0,
+            0
+        )
+        pressed = False
+
+        return True
+
+    finally:
+        # Safety release even when an exception occurs between DOWN and UP.
+        if pressed:
+            try:
+                _sendinput_mouse_flag(
+                    MOUSEEVENTF_LEFTUP
+                )
+            except Exception:
+                pass
+
+            try:
+                user32.mouse_event(
+                    MOUSEEVENTF_LEFTUP,
+                    0,
+                    0,
+                    0,
+                    0
+                )
+            except Exception:
+                pass
+
 
 
 def capture_screen(sct, hwnd=None):
@@ -3704,8 +3775,6 @@ def click_move(
         f"source=({sx},{sy}) target=({tx},{ty})"
     )
 
-    user32.SetCursorPos(0, 0)
-
     if not left_click_screen(
         sx,
         sy,
@@ -3750,8 +3819,6 @@ def click_move(
             f"{move.uci()}"
         )
         return False
-
-    user32.SetCursorPos(0, 0)
 
     if move.promotion is not None:
         if promotion_color is None:
