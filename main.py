@@ -12453,10 +12453,9 @@ def main():
                             new_match_start_stable = 0
                             new_match_start_key = None
                             new_match_start_seen_at = None
-                            next_orientation_recheck = (
-                                time.perf_counter()
-                                + MATCH_ORIENTATION_RECHECK_INTERVAL
-                            )
+                            # Force an immediate orientation recheck on
+                            # every newly accepted game, then continue every 1s.
+                            next_orientation_recheck = time.perf_counter()
 
                 if match_ui.get("phase") == "RESULT":
                     status = "RESULT SCREEN | REMATCH / NEW MATCH AUTO CONTROLS"
