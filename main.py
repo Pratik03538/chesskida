@@ -148,6 +148,11 @@ BOT_STRATEGIC_CHANCE = 0.22
 BOT_STRONG_FAVOR_CP = 250
 BOT_DELAY_REPEAT_GAP = 0.045
 
+# Small random gap between SOURCE and DESTINATION clicks.
+# This is the physical move gesture interval, not a thinking delay.
+BOT_SOURCE_TO_TARGET_DELAY_MIN = 0.008
+BOT_SOURCE_TO_TARGET_DELAY_MAX = 0.055
+
 # Retained as counters for match-state reset/log compatibility.
 RANDOM_BUFFER_MOVE_MIN = 5
 RANDOM_BUFFER_MOVE_MAX = 8
@@ -3695,7 +3700,17 @@ def click_move(
                 f"{move.uci()} | {source_reason} | continuing to target"
             )
 
-    time.sleep(0.012)
+    source_target_delay = random.uniform(
+        BOT_SOURCE_TO_TARGET_DELAY_MIN,
+        BOT_SOURCE_TO_TARGET_DELAY_MAX
+    )
+
+    print(
+        "[BOT GESTURE] "
+        f"source->target gap={source_target_delay:.3f}s"
+    )
+
+    time.sleep(source_target_delay)
 
     if not left_click_screen(
         tx,
