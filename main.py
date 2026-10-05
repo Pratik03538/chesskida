@@ -7,6 +7,7 @@ import os
 import time
 import random
 import math
+from collections import deque
 import chess
 import chess.engine
 
@@ -76,6 +77,16 @@ HUMAN_TEMPO_RANDOM_JITTER = 0.07
 # Human-like source -> destination handoff. This stays small enough to keep
 # the bot responsive while avoiding an obviously fixed machine interval.
 HUMAN_CLICK_GAP_RANGE = (0.035, 0.095)
+
+# Opening premove preparation.
+# Moves are prepared by exact FEN, but the confirmed python-chess board is
+# NEVER advanced for a future move until physical verification succeeds.
+OPENING_PREMOVE_ENABLED = True
+OPENING_PREMOVE_MAX_BOT_MOVES = 5
+OPENING_PREMOVE_MAX_TOTAL_PLIES = 10
+OPENING_PREMOVE_MAX_NODES = 600
+OPENING_PREMOVE_FUTURE_NODE_BUDGET = 400
+OPENING_PREMOVE_MAX_AGE = 180.0
 
 # Tempo rhythm state. A mode lasts for several moves so the player has a
 # natural rhythm instead of independently re-rolling a delay every move.
@@ -3630,6 +3641,240 @@ def _verify_source_click_selected(
         time.sleep(BOT_SOURCE_SELECT_POLL)
 
     return False, last_reason
+
+
+def _top_book_candidate(gm_book, board):
+    """Return the highest-weight legal book move."""
+    try:
+        choice = gm_book.choose(board)
+    except Exception:
+        return None
+
+    if not choice:
+        return None
+
+    candidates = list(
+        choice.get("candidates") or []
+    )
+
+    if not candidates:
+        return None
+
+    candidates.sort(
+        key=lambda item: (
+            -float(item.get("weight", 0.0)),
+            item["move"].uci()
+        )
+    )
+
+    return {
+        "move": candidates[0]["move"],
+        "weight": float(candidates[0].get("weight", 0.0)),
+        "rank": 1,
+        "entries": len(candidates),
+    }
+
+
+def prepare_opening_premove_cache(
+    gm_book,
+    root_board,
+    stockfish_color,
+    cache,
+    max_bot_moves=None,
+    node_budget=None,
+    clear_existing=False
+):
+    """
+    Prepare a bounded opening-book decision tree keyed by exact FEN.
+
+    Human moves are deliberately NOT pushed into the real board. Each legal
+    human reply is explored on a temporary board; if that resulting position
+    has a book move for Stockfish, that response is cached.
+    """
+    if (
+        not OPENING_PREMOVE_ENABLED
+        or gm_book is None
+        or root_board is None
+        or stockfish_color not in (chess.WHITE, chess.BLACK)
+    ):
+        return {
+            "positions": 0,
+            "prepared": 0,
+            "nodes": 0,
+            "root": None,
+        }
+
+    if max_bot_moves is None:
+        max_bot_moves = OPENING_PREMOVE_MAX_BOT_MOVES
+
+    if node_budget is None:
+        node_budget = OPENING_PREMOVE_MAX_NODES
+
+    max_bot_moves = max(1, int(max_bot_moves))
+    node_budget = max(1, int(node_budget))
+
+    if clear_existing:
+        cache.clear()
+
+    work = deque()
+    work.append(
+        (
+            root_board.copy(stack=False),
+            0
+        )
+    )
+
+    visited = set()
+    prepared = 0
+    nodes = 0
+
+    while work and nodes < node_budget:
+        current_board, bot_depth = work.popleft()
+        nodes += 1
+
+        if bot_depth > max_bot_moves:
+            continue
+
+        fen = current_board.fen()
+        visit_key = (fen, bot_depth)
+
+        if visit_key in visited:
+            continue
+
+        visited.add(visit_key)
+
+        if current_board.is_game_over():
+            continue
+
+        if current_board.turn == stockfish_color:
+            if bot_depth >= max_bot_moves:
+                continue
+
+            candidate = _top_book_candidate(
+                gm_book,
+                current_board
+            )
+
+            if candidate is None:
+                continue
+
+            move = candidate["move"]
+
+            if move not in current_board.legal_moves:
+                continue
+
+            next_depth = bot_depth + 1
+
+            cache.setdefault(
+                fen,
+                {
+                    "uci": move.uci(),
+                    "san": current_board.san(move),
+                    "weight": candidate["weight"],
+                    "rank": candidate["rank"],
+                    "entries": candidate["entries"],
+                    "depth": next_depth,
+                    "created_at": time.perf_counter(),
+                }
+            )
+
+            prepared += 1
+
+            if next_depth >= max_bot_moves:
+                continue
+
+            after = expected_board_after_move(
+                current_board,
+                move
+            )
+
+            work.append(
+                (
+                    after,
+                    next_depth
+                )
+            )
+
+        else:
+            if bot_depth >= max_bot_moves:
+                continue
+
+            # Human move is unknown. Explore every legal reply on a temporary
+            # board so the next Stockfish response can be ready by exact FEN.
+            for human_move in list(
+                current_board.legal_moves
+            ):
+                human_board = expected_board_after_move(
+                    current_board,
+                    human_move
+                )
+
+                work.append(
+                    (
+                        human_board,
+                        bot_depth
+                    )
+                )
+
+    return {
+        "positions": len(cache),
+        "prepared": prepared,
+        "nodes": nodes,
+        "root": root_board.fen(),
+    }
+
+
+def get_opening_premove(
+    cache,
+    board
+):
+    if (
+        not OPENING_PREMOVE_ENABLED
+        or board is None
+        or len(board.move_stack) > OPENING_PREMOVE_MAX_TOTAL_PLIES
+    ):
+        return None
+
+    fen = board.fen()
+    entry = cache.get(fen)
+
+    if entry is None:
+        return None
+
+    created_at = float(
+        entry.get("created_at", 0.0)
+    )
+
+    if (
+        created_at > 0.0
+        and time.perf_counter() - created_at
+        > OPENING_PREMOVE_MAX_AGE
+    ):
+        cache.pop(
+            fen,
+            None
+        )
+        return None
+
+    try:
+        move = chess.Move.from_uci(
+            entry["uci"]
+        )
+    except Exception:
+        cache.pop(
+            fen,
+            None
+        )
+        return None
+
+    if move not in board.legal_moves:
+        cache.pop(
+            fen,
+            None
+        )
+        return None
+
+    return entry
 
 
 def human_like_move_delay(
@@ -10005,6 +10250,7 @@ def main():
     last_bot_position_key = None
     pending_bot_moves = {}
     pending_recovered_human = None
+    opening_premove_cache = {}
     next_main_turn_rescan = time.perf_counter() + TURN_RESCAN_INTERVAL
     visual_black_perspective = False
     stockfish_color = None
