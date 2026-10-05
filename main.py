@@ -10846,6 +10846,10 @@ def main():
                             if startup_new_game is not None:
                                 board = startup_new_game["board"]
                                 opening_premove_cache.clear()
+                                if opening_premove_armed is not None:
+                                    release_physical_opening_drag(
+                                        opening_premove_armed
+                                    )
                                 opening_premove_armed = None
                                 opening_premove_board_id = None
                                 visual_black_perspective = (
@@ -11297,6 +11301,10 @@ def main():
                         if new_game is not None:
                             board = new_game["board"]
                             opening_premove_cache.clear()
+                            if opening_premove_armed is not None:
+                                release_physical_opening_drag(
+                                    opening_premove_armed
+                                )
                             opening_premove_armed = None
                             opening_premove_board_id = None
 
@@ -11497,6 +11505,10 @@ def main():
                         and current_board_id != opening_premove_board_id
                     ):
                         opening_premove_cache.clear()
+                        if opening_premove_armed is not None:
+                            release_physical_opening_drag(
+                                opening_premove_armed
+                            )
                         opening_premove_armed = None
 
                         premove_stats = (
@@ -11690,6 +11702,10 @@ def main():
                                     release_physical_opening_drag(
                                         opening_premove_armed
                                     )
+                                    if opening_premove_armed is not None:
+                                        release_physical_opening_drag(
+                                            opening_premove_armed
+                                        )
                                     opening_premove_armed = None
 
                                 elif move.uci() == opening_premove_armed.get(
@@ -11713,6 +11729,10 @@ def main():
                                     release_physical_opening_drag(
                                         opening_premove_armed
                                     )
+                                    if opening_premove_armed is not None:
+                                        release_physical_opening_drag(
+                                            opening_premove_armed
+                                        )
                                     opening_premove_armed = None
 
                             detection_source = getattr(
@@ -11752,6 +11772,10 @@ def main():
                                     expected_human_board.fen(),
                                     None
                                 )
+                                if opening_premove_armed is not None:
+                                    release_physical_opening_drag(
+                                        opening_premove_armed
+                                    )
                                 opening_premove_armed = None
                                 pending_bot_moves.clear()
                                 next_human_best_uci = None
@@ -11888,6 +11912,12 @@ def main():
                                             f"| verify={premove_combo_elapsed:.3f}s"
                                         )
 
+                                        before_premove_bot_board = (
+                                            expected_human_board.copy(
+                                                stack=False
+                                            )
+                                        )
+
                                         board.push(
                                             move
                                         )
@@ -11895,15 +11925,42 @@ def main():
                                             armed_bot_move
                                         )
 
+                                        # Refresh the same post-bot analysis pipeline
+                                        # immediately. This supplies the next predicted
+                                        # human move so the next physical drag can arm
+                                        # on the very next loop iteration.
+                                        analysis_state = build_analysis(
+                                            engine,
+                                            before_premove_bot_board,
+                                            board,
+                                            armed_bot_move,
+                                            best_info=None
+                                        )
+
+                                        if analysis_state:
+                                            predicted = analysis_state.get(
+                                                "next_human_move"
+                                            )
+                                            next_human_best_uci = (
+                                                predicted
+                                                if predicted
+                                                and predicted != "-"
+                                                else None
+                                            )
+                                        else:
+                                            next_human_best_uci = None
+
                                         opening_premove_cache.pop(
                                             expected_human_board.fen(),
                                             None
                                         )
+                                        if opening_premove_armed is not None:
+                                            release_physical_opening_drag(
+                                                opening_premove_armed
+                                            )
                                         opening_premove_armed = None
                                         pending_bot_moves.clear()
-                                        next_human_best_uci = None
                                         last_bot_position_key = None
-                                        analysis_state = None
                                         next_main_turn_rescan = (
                                             time.perf_counter()
                                             + TURN_RESCAN_INTERVAL
@@ -11919,6 +11976,7 @@ def main():
                                             "[PREMOVE-DRAG] COMMITTED | "
                                             f"human={move.uci()} "
                                             f"| bot={armed_bot_move.uci()} "
+                                            f"| next_human={next_human_best_uci or '-'} "
                                             "| next premove can arm immediately"
                                         )
 
@@ -11931,6 +11989,10 @@ def main():
                                         "| >1.000s => premove FAILED; normal path resumes"
                                     )
 
+                                    if opening_premove_armed is not None:
+                                        release_physical_opening_drag(
+                                            opening_premove_armed
+                                        )
                                     opening_premove_armed = None
 
                                 else:
@@ -11942,6 +12004,10 @@ def main():
                                     release_physical_opening_drag(
                                         opening_premove_armed
                                     )
+                                    if opening_premove_armed is not None:
+                                        release_physical_opening_drag(
+                                            opening_premove_armed
+                                        )
                                     opening_premove_armed = None
 
                             next_human_best_uci = None
@@ -12037,6 +12103,10 @@ def main():
                                                 f"bot={armed.get('bot_uci','-')}"
                                             )
 
+                                        if opening_premove_armed is not None:
+                                            release_physical_opening_drag(
+                                                opening_premove_armed
+                                            )
                                         opening_premove_armed = None
 
                                     else:
@@ -12082,6 +12152,10 @@ def main():
                                                     "native queue was armed before human move"
                                                 )
                                         except Exception:
+                                            if opening_premove_armed is not None:
+                                                release_physical_opening_drag(
+                                                    opening_premove_armed
+                                                )
                                             opening_premove_armed = None
 
 
@@ -13164,6 +13238,10 @@ def main():
                                             "[PREMOVE-QUEUE] CONSUMED | "
                                             f"bot={best_move.uci()} | queue advanced"
                                         )
+                                        if opening_premove_armed is not None:
+                                            release_physical_opening_drag(
+                                                opening_premove_armed
+                                            )
                                         opening_premove_armed = None
 
                                     last_bot_position_key = None
@@ -13518,6 +13596,10 @@ def main():
                         if new_match_start_stable >= 2:
                             board = fresh_game["board"]
                             opening_premove_cache.clear()
+                            if opening_premove_armed is not None:
+                                release_physical_opening_drag(
+                                    opening_premove_armed
+                                )
                             opening_premove_armed = None
                             opening_premove_board_id = None
                             visual_black_perspective = (
