@@ -11141,6 +11141,42 @@ def main():
                     and stockfish_color is not None
                     and not match_ui.get("screen_guard")
                 ):
+                    # Build the opening premove tree once for this new game
+                    # object. This uses temporary python-chess boards only;
+                    # the confirmed physical/virtual board is untouched.
+                    current_board_id = id(board)
+
+                    if (
+                        OPENING_PREMOVE_ENABLED
+                        and len(board.move_stack)
+                        <= OPENING_PREMOVE_MAX_TOTAL_PLIES
+                        and current_board_id != opening_premove_board_id
+                    ):
+                        opening_premove_cache.clear()
+
+                        premove_stats = (
+                            prepare_opening_premove_cache(
+                                gm_book,
+                                board,
+                                stockfish_color,
+                                opening_premove_cache,
+                                max_bot_moves=OPENING_PREMOVE_MAX_BOT_MOVES,
+                                node_budget=OPENING_PREMOVE_MAX_NODES,
+                                clear_existing=False
+                            )
+                        )
+
+                        opening_premove_board_id = current_board_id
+
+                        if premove_stats.get("prepared", 0) > 0:
+                            print(
+                                "[PREMOVE] READY | "
+                                f"positions={premove_stats['positions']} "
+                                f"| prepared={premove_stats['prepared']} "
+                                f"| nodes={premove_stats['nodes']} "
+                                f"| max_bot_moves={OPENING_PREMOVE_MAX_BOT_MOVES}"
+                            )
+
                     if (
                         board.turn == human_color
                         and not bot_thinking
