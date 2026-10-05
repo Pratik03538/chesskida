@@ -11482,127 +11482,159 @@ def main():
                                     )
 
                                 else:
-                                    book_choice = gm_book.choose(board)
+                                    safe_opening = get_safe_gm_opening_premove(
+                                        board,
+                                        stockfish_color
+                                    )
 
-                                    if book_choice is not None:
+                                    if safe_opening is not None:
                                         engine_elapsed = 0.0
                                         multipv_result = []
                                         result = None
-                                        best_move = book_choice["move"]
+                                        best_move = safe_opening["move"]
                                         selected_info = None
                                         best_info_move = None
-                                        best_san = book_choice["san"]
+                                        best_san = board.san(best_move)
                                         selection_meta = {
-                                            "rank": int(book_choice["rank"] - 1),
+                                            "rank": 0,
                                             "reason": (
-                                                "GM BOOK | "
-                                                f"entries={book_choice['entries']} "
-                                                "| weighted choice"
+                                                "FIXED GM OPENING LINE | "
+                                                f"step={safe_opening['index'] + 1}"
                                             ),
-                                            "source": "GM_BOOK",
-                                            "book_entries": int(
-                                                book_choice["entries"]
-                                            ),
-                                            "book_weight": float(
-                                                book_choice["weight"]
-                                            ),
+                                            "source": "FIXED_GM_OPENING",
+                                            "book_entries": 0,
+                                            "book_weight": 0.0,
                                         }
 
                                         print(
-                                            "[BOOK] POSITION IN BOOK | "
-                                            f"entries={book_choice['entries']} "
-                                            f"| SELECTED={book_choice['uci']} "
-                                            f"{book_choice['san']} "
-                                            "| weighted choice | "
-                                            f"BOOK-RANK=#{book_choice['rank']}"
+                                            "[PREMOVE TEST] "
+                                            "FIXED GM OPENING MOVE | "
+                                            f"{best_move.uci()} {best_san} "
+                                            f"| step={safe_opening['index'] + 1}"
                                         )
 
                                     else:
-                                        print(
-                                            "[BOOK] OUT OF BOOK -> "
-                                            "switching to human-like engine logic"
-                                        )
-                                        print(
-                                            "[STOCKFISH] Thinking..."
-                                        )
+                                        book_choice = gm_book.choose(board)
 
-                                        engine_start = time.perf_counter()
+                                        if book_choice is not None:
+                                            engine_elapsed = 0.0
+                                            multipv_result = []
+                                            result = None
+                                            best_move = book_choice["move"]
+                                            selected_info = None
+                                            best_info_move = None
+                                            best_san = book_choice["san"]
+                                            selection_meta = {
+                                                "rank": int(book_choice["rank"] - 1),
+                                                "reason": (
+                                                    "GM BOOK | "
+                                                    f"entries={book_choice['entries']} "
+                                                    "| weighted choice"
+                                                ),
+                                                "source": "GM_BOOK",
+                                                "book_entries": int(
+                                                    book_choice["entries"]
+                                                ),
+                                                "book_weight": float(
+                                                    book_choice["weight"]
+                                                ),
+                                            }
 
-                                        multipv_result = engine.analyse(
-                                            board,
-                                            chess.engine.Limit(
-                                                depth=STOCKFISH_DEPTH,
-                                                time=STOCKFISH_TIME
-                                            ),
-                                            multipv=TRAINING_MULTI_PV
-                                        )
-
-                                        engine_elapsed = (
-                                            time.perf_counter()
-                                            - engine_start
-                                        )
-
-                                        if not isinstance(
-                                            multipv_result,
-                                            list
-                                        ):
-                                            multipv_result = [
-                                                multipv_result
-                                            ]
-
-                                        result = multipv_result[0]
-
-                                        selected_previous_eval = (
-                                            analysis_state.get(
-                                                "eval_cp"
-                                            )
-                                            if analysis_state is not None
-                                            else None
-                                        )
-
-                                        (
-                                            opponent_accuracy,
-                                            opponent_sample_count
-                                        ) = opponent_recent_accuracy(
-                                            opponent_match_history
-                                        )
-
-                                        (
-                                            best_move,
-                                            selected_info,
-                                            selection_meta
-                                        ) = choose_stockfish_move(
-                                            board,
-                                            multipv_result,
-                                            previous_eval_white_cp=selected_previous_eval,
-                                            opponent_accuracy=opponent_accuracy,
-                                            opponent_sample_count=opponent_sample_count,
-                                            opponent_pressure=opponent_pressure
-                                        )
-
-                                        opponent_pressure = False
-
-                                        if (
-                                            best_move is None
-                                            or best_move
-                                            not in board.legal_moves
-                                        ):
-                                            raise RuntimeError(
-                                                "Stockfish selector did not "
-                                                "return a legal move."
+                                            print(
+                                                "[BOOK] POSITION IN BOOK | "
+                                                f"entries={book_choice['entries']} "
+                                                f"| SELECTED={book_choice['uci']} "
+                                                f"{book_choice['san']} "
+                                                "| weighted choice | "
+                                                f"BOOK-RANK=#{book_choice['rank']}"
                                             )
 
-                                        # Freeze the newly selected Stockfish move immediately.
-                                        locked_bot_move = best_move
+                                        else:
+                                            print(
+                                                "[BOOK] OUT OF BOOK -> "
+                                                "switching to human-like engine logic"
+                                            )
+                                            print(
+                                                "[STOCKFISH] Thinking..."
+                                            )
 
-                                        best_info_move = result.get(
-                                            "pv",
-                                            [None]
-                                        )[0]
+                                            engine_start = time.perf_counter()
 
-                                        best_san = board.san(
-                                            best_move
-                                        )
+                                            multipv_result = engine.analyse(
+                                                board,
+                                                chess.engine.Limit(
+                                                    depth=STOCKFISH_DEPTH,
+                                                    time=STOCKFISH_TIME
+                                                ),
+                                                multipv=TRAINING_MULTI_PV
+                                            )
+
+                                            engine_elapsed = (
+                                                time.perf_counter()
+                                                - engine_start
+                                            )
+
+                                            if not isinstance(
+                                                multipv_result,
+                                                list
+                                            ):
+                                                multipv_result = [
+                                                    multipv_result
+                                                ]
+
+                                            result = multipv_result[0]
+
+                                            selected_previous_eval = (
+                                                analysis_state.get(
+                                                    "eval_cp"
+                                                )
+                                                if analysis_state is not None
+                                                else None
+                                            )
+
+                                            (
+                                                opponent_accuracy,
+                                                opponent_sample_count
+                                            ) = opponent_recent_accuracy(
+                                                opponent_match_history
+                                            )
+
+                                            (
+                                                best_move,
+                                                selected_info,
+                                                selection_meta
+                                            ) = choose_stockfish_move(
+                                                board,
+                                                multipv_result,
+                                                previous_eval_white_cp=selected_previous_eval,
+                                                opponent_accuracy=opponent_accuracy,
+                                                opponent_sample_count=opponent_sample_count,
+                                                opponent_pressure=opponent_pressure
+                                            )
+
+                                            opponent_pressure = False
+
+                                            if (
+                                                best_move is None
+                                                or best_move
+                                                not in board.legal_moves
+                                            ):
+                                                raise RuntimeError(
+                                                    "Stockfish selector did not "
+                                                    "return a legal move."
+                                                )
+
+                                            # Freeze the newly selected Stockfish move immediately.
+                                            locked_bot_move = best_move
+
+                                            best_info_move = result.get(
+                                                "pv",
+                                                [None]
+                                            )[0]
+
+                                            best_san = board.san(
+                                                best_move
+                                            )
 
                                 # Book moves already have a valid frozen decision.
                                 # Keep the same freeze invariant used by the engine path.
