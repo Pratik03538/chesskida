@@ -2326,6 +2326,17 @@ if os.name == "nt":
     except Exception:
         pass
 
+    try:
+        user32.PostMessageW.argtypes = [
+            wintypes.HWND,
+            wintypes.UINT,
+            wintypes.WPARAM,
+            wintypes.LPARAM,
+        ]
+        user32.PostMessageW.restype = wintypes.BOOL
+    except Exception:
+        pass
+
 PIECE_MAP = {
     "white_king.png": "K",
     "white_queen.png": "Q",
@@ -2647,34 +2658,88 @@ def left_click_screen(x, y, hold_seconds=0.020):
     return True
 
 
+def _make_mouse_lparam(client_x, client_y):
+    return (
+        (int(client_y) & 0xFFFF) << 16
+    ) | (
+        int(client_x) & 0xFFFF
+    )
+
+
+def _post_scrcpy_mouse(
+    hwnd,
+    message,
+    screen_x,
+    screen_y,
+    wparam=0,
+    screen_origin=None
+):
+    """Send a mouse message directly to the scrcpy client."""
+    if (
+        hwnd is None
+        or not user32
+        or not user32.IsWindow(hwnd)
+    ):
+        return False
+
+    try:
+        if screen_origin is None:
+            screen_origin = get_scrcpy_screen_origin(hwnd)
+
+        if screen_origin is None:
+            return False
+
+        client_x = int(screen_x) - int(screen_origin[0])
+        client_y = int(screen_y) - int(screen_origin[1])
+
+        return bool(
+            user32.PostMessageW(
+                hwnd,
+                int(message),
+                int(wparam),
+                int(
+                    _make_mouse_lparam(
+                        client_x,
+                        client_y
+                    )
+                )
+            )
+        )
+    except Exception:
+        return False
+
+
 def _physical_opening_drag_loop(armed):
-    """Keep the OS drag alive until explicitly released."""
+    """Continuously send MOVE+LEFT held events to scrcpy until released."""
     stop_event = armed["drag_stop_event"]
+    hwnd = armed.get("scrcpy_hwnd")
     target_x = int(armed["target_x"])
     target_y = int(armed["target_y"])
+    origin = armed.get("screen_origin")
 
     while not stop_event.is_set():
         try:
-            user32.SetCursorPos(
+            posted = _post_scrcpy_mouse(
+                hwnd,
+                WM_MOUSEMOVE,
                 target_x,
-                target_y
+                target_y,
+                wparam=MK_LBUTTON,
+                screen_origin=origin
             )
 
-            # Also emit a real mouse-move event while the button stays down.
-            # This prevents the scrcpy/browser input bridge from treating a
-            # long held drag as stale.
-            if not _sendinput_mouse_flag(
-                MOUSEEVENTF_MOVE
-            ):
-                user32.mouse_event(
-                    MOUSEEVENTF_MOVE,
-                    0,
-                    0,
-                    0,
-                    0
+            if not posted:
+                # Fallback for environments where scrcpy does not accept
+                # posted window messages.
+                user32.SetCursorPos(
+                    target_x,
+                    target_y
+                )
+                _sendinput_mouse_flag(
+                    MOUSEEVENTF_MOVE
                 )
         except Exception:
-            break
+            pass
 
         stop_event.wait(0.001)
 
@@ -2683,31 +2748,47 @@ def begin_physical_opening_drag(
     source_x,
     source_y,
     target_x,
-    target_y
+    target_y,
+    scrcpy_hwnd,
+    screen_origin=None
 ):
-    """Press source, physically drag to target, then keep holding forever."""
+    """Press source, drag to target, then HOLD the touch on target."""
     try:
-        user32.SetCursorPos(
-            int(source_x),
-            int(source_y)
-        )
-        time.sleep(0.001)
-
-        if not _sendinput_mouse_flag(
-            MOUSEEVENTF_LEFTDOWN
-        ):
-            user32.mouse_event(
-                MOUSEEVENTF_LEFTDOWN,
-                0,
-                0,
-                0,
-                0
+        if screen_origin is None:
+            screen_origin = get_scrcpy_screen_origin(
+                scrcpy_hwnd
             )
 
-        # Perform an actual short drag instead of teleporting from source to
-        # target. This gives the UI a clear DOWN -> MOVE -> MOVE -> TARGET
-        # sequence before the long hold begins.
-        steps = 8
+        direct_down = _post_scrcpy_mouse(
+            scrcpy_hwnd,
+            WM_LBUTTONDOWN,
+            source_x,
+            source_y,
+            wparam=MK_LBUTTON,
+            screen_origin=screen_origin
+        )
+
+        if not direct_down:
+            user32.SetCursorPos(
+                int(source_x),
+                int(source_y)
+            )
+            time.sleep(0.001)
+
+            if not _sendinput_mouse_flag(
+                MOUSEEVENTF_LEFTDOWN
+            ):
+                user32.mouse_event(
+                    MOUSEEVENTF_LEFTDOWN,
+                    0,
+                    0,
+                    0,
+                    0
+                )
+
+        # Explicit physical drag: multiple MOVE messages while the button
+        # remains down, then hold on the destination.
+        steps = 16
 
         for step in range(
             1,
@@ -2731,23 +2812,25 @@ def begin_physical_opening_drag(
                 ) * ratio
             )
 
-            user32.SetCursorPos(
-                int(round(px)),
-                int(round(py))
+            posted = _post_scrcpy_mouse(
+                scrcpy_hwnd,
+                WM_MOUSEMOVE,
+                px,
+                py,
+                wparam=MK_LBUTTON,
+                screen_origin=screen_origin
             )
 
-            if not _sendinput_mouse_flag(
-                MOUSEEVENTF_MOVE
-            ):
-                user32.mouse_event(
-                    MOUSEEVENTF_MOVE,
-                    0,
-                    0,
-                    0,
-                    0
+            if not posted:
+                user32.SetCursorPos(
+                    int(round(px)),
+                    int(round(py))
+                )
+                _sendinput_mouse_flag(
+                    MOUSEEVENTF_MOVE
                 )
 
-            time.sleep(0.002)
+            time.sleep(0.001)
 
         stop_event = threading.Event()
 
@@ -2758,6 +2841,9 @@ def begin_physical_opening_drag(
             "target_y": int(target_y),
             "mouse_held": True,
             "drag_stop_event": stop_event,
+            "scrcpy_hwnd": scrcpy_hwnd,
+            "screen_origin": screen_origin,
+            "direct_scrcpy": bool(direct_down),
         }
 
         thread = threading.Thread(
@@ -2774,19 +2860,19 @@ def begin_physical_opening_drag(
 
     except Exception:
         try:
-            _sendinput_mouse_flag(
-                MOUSEEVENTF_LEFTUP
+            _post_scrcpy_mouse(
+                scrcpy_hwnd,
+                WM_LBUTTONUP,
+                target_x,
+                target_y,
+                screen_origin=screen_origin
             )
         except Exception:
             pass
 
         try:
-            user32.mouse_event(
-                MOUSEEVENTF_LEFTUP,
-                0,
-                0,
-                0,
-                0
+            _sendinput_mouse_flag(
+                MOUSEEVENTF_LEFTUP
             )
         except Exception:
             pass
@@ -2797,14 +2883,18 @@ def begin_physical_opening_drag(
 def maintain_physical_opening_drag(
     armed
 ):
-    """Force the held premove back to target if another UI action moved it."""
+    """Re-assert the held target position inside scrcpy."""
     if not armed or not armed.get("mouse_held"):
         return False
 
     try:
-        user32.SetCursorPos(
+        _post_scrcpy_mouse(
+            armed.get("scrcpy_hwnd"),
+            WM_MOUSEMOVE,
             int(armed["target_x"]),
-            int(armed["target_y"])
+            int(armed["target_y"]),
+            wparam=MK_LBUTTON,
+            screen_origin=armed.get("screen_origin")
         )
         return True
     except Exception:
@@ -2814,7 +2904,7 @@ def maintain_physical_opening_drag(
 def release_physical_opening_drag(
     armed
 ):
-    """Stop continuous drag first, then release on the destination square."""
+    """Stop the continuous drag and release on the destination."""
     if not armed or not armed.get("mouse_held"):
         return True
 
@@ -2828,30 +2918,39 @@ def release_physical_opening_drag(
 
         if thread is not None and thread.is_alive():
             thread.join(
-                timeout=0.020
+                timeout=0.030
             )
 
-        user32.SetCursorPos(
+        released = _post_scrcpy_mouse(
+            armed.get("scrcpy_hwnd"),
+            WM_LBUTTONUP,
             int(armed["target_x"]),
-            int(armed["target_y"])
-        )
-        time.sleep(0.0005)
-
-        released = _sendinput_mouse_flag(
-            MOUSEEVENTF_LEFTUP
+            int(armed["target_y"]),
+            screen_origin=armed.get("screen_origin")
         )
 
         if not released:
-            user32.mouse_event(
-                MOUSEEVENTF_LEFTUP,
-                0,
-                0,
-                0,
-                0
+            user32.SetCursorPos(
+                int(armed["target_x"]),
+                int(armed["target_y"])
             )
+
+            released = _sendinput_mouse_flag(
+                MOUSEEVENTF_LEFTUP
+            )
+
+            if not released:
+                user32.mouse_event(
+                    MOUSEEVENTF_LEFTUP,
+                    0,
+                    0,
+                    0,
+                    0
+                )
 
         armed["mouse_held"] = False
         return True
+
     except Exception:
         try:
             user32.mouse_event(
@@ -4223,7 +4322,9 @@ def arm_physical_opening_premove(
             sx,
             sy,
             tx,
-            ty
+            ty,
+            scrcpy_hwnd,
+            screen_origin=screen_origin
         )
 
         if not drag_state:
