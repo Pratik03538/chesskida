@@ -11697,13 +11697,6 @@ def main():
                                         from_book=tempo_from_book
                                     )
 
-                                    print(
-                                        "[HUMAN TEMPO] "
-                                        f"think={tempo_delay:.3f}s "
-                                        f"move={best_san} "
-                                        f"source={'BOOK' if tempo_from_book else 'ENGINE'}"
-                                    )
-
                                     if tempo_delay > 0.0:
                                         time.sleep(tempo_delay)
 
@@ -11962,6 +11955,16 @@ def main():
                                         f"[STOCKFISH] Confirmed: {best_san}",
                                         analysis_state
                                     )
+
+                                    # Keep the tempo result as the final move-related
+                                    # log line, after physical verification and state print.
+                                    if 'tempo_delay' in locals():
+                                        print(
+                                            "[HUMAN TEMPO] COMPLETE | "
+                                            f"move={best_san} "
+                                            f"think={tempo_delay:.3f}s "
+                                            f"source={'BOOK' if tempo_from_book else 'ENGINE'}"
+                                        )
 
                                 else:
                                     # Verification failure is recoverable. Keep the exact
