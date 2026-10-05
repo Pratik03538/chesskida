@@ -11347,6 +11347,54 @@ def main():
                                     )
                                 )
 
+                                is_opening_premove = False
+
+                                # Prepared opening response for this exact confirmed
+                                # FEN. This creates only a frozen move decision; it
+                                # does not advance the virtual board.
+                                if pending_entry is None:
+                                    premove_entry = get_opening_premove(
+                                        opening_premove_cache,
+                                        board
+                                    )
+
+                                    if premove_entry is not None:
+                                        is_opening_premove = True
+                                        pending_entry = {
+                                            "uci": premove_entry["uci"],
+                                            "san": premove_entry["san"],
+                                            "result": None,
+                                            "best_info_move": None,
+                                            "selection_meta": {
+                                                "rank": int(
+                                                    premove_entry.get("rank", 1)
+                                                ) - 1,
+                                                "reason": (
+                                                    "OPENING PREMOVE | "
+                                                    f"depth={premove_entry.get('depth', 0)}/"
+                                                    f"{OPENING_PREMOVE_MAX_BOT_MOVES} "
+                                                    f"weight={premove_entry.get('weight', 0.0):.0f}"
+                                                ),
+                                                "source": "BOOK_PREMOVE",
+                                                "book_entries": int(
+                                                    premove_entry.get("entries", 0)
+                                                ),
+                                                "book_weight": float(
+                                                    premove_entry.get("weight", 0.0)
+                                                ),
+                                            },
+                                            "tempo_delay": 0.0,
+                                            "tempo_from_book": True,
+                                            "is_opening_premove": True,
+                                        }
+
+                                        print(
+                                            "[PREMOVE] HIT | "
+                                            f"{premove_entry['san']} "
+                                            "| think=0.000s "
+                                            f"| prepared_depth={premove_entry.get('depth', 0)}"
+                                        )
+
                                 # Tempo is frozen with the move. A physical retry
                                 # never causes a second full "human think".
                                 tempo_delay = None
@@ -11396,6 +11444,13 @@ def main():
                                         )
                                     )
 
+                                    is_opening_premove = bool(
+                                        pending_entry.get(
+                                            "is_opening_premove",
+                                            is_opening_premove
+                                        )
+                                    )
+
                                     match_ui["preference"] = {
                                         "best": (
                                             best_info_move.uci()
@@ -11418,11 +11473,17 @@ def main():
                                         ),
                                     }
 
-                                    print(
-                                        "[STOCKFISH] "
-                                        f"Retrying pending move: "
-                                        f"{best_san}"
-                                    )
+                                    if is_opening_premove:
+                                        print(
+                                            "[PREMOVE] EXECUTING | "
+                                            f"{best_san} | zero-think path"
+                                        )
+                                    else:
+                                        print(
+                                            "[STOCKFISH] "
+                                            f"Retrying pending move: "
+                                            f"{best_san}"
+                                        )
 
                                 else:
                                     book_choice = gm_book.choose(board)
@@ -11552,6 +11613,66 @@ def main():
                                 if locked_bot_move is None:
                                     locked_bot_move = best_move
 
+                                # Prepare future opening responses while the current
+                                # physical board is still the confirmed pre-move board.
+                                # This can never mutate the real python-chess board.
+                                if (
+                                    OPENING_PREMOVE_ENABLED
+                                    and selection_meta.get("source")
+                                    in ("GM_BOOK", "BOOK_PREMOVE")
+                                    and len(board.move_stack)
+                                    <= OPENING_PREMOVE_MAX_TOTAL_PLIES
+                                ):
+                                    after_current = expected_board_after_move(
+                                        board,
+                                        best_move
+                                    )
+
+                                    bot_moves_done = sum(
+                                        1
+                                        for ply_index, _move in enumerate(
+                                            board.move_stack
+                                        )
+                                        if (
+                                            (
+                                                stockfish_color == chess.WHITE
+                                                and ply_index % 2 == 0
+                                            )
+                                            or
+                                            (
+                                                stockfish_color == chess.BLACK
+                                                and ply_index % 2 == 1
+                                            )
+                                        )
+                                    ) + 1
+
+                                    remaining_bot_moves = (
+                                        OPENING_PREMOVE_MAX_BOT_MOVES
+                                        - bot_moves_done
+                                    )
+
+                                    if remaining_bot_moves > 0:
+                                        future_stats = (
+                                            prepare_opening_premove_cache(
+                                                gm_book,
+                                                after_current,
+                                                stockfish_color,
+                                                opening_premove_cache,
+                                                max_bot_moves=remaining_bot_moves,
+                                                node_budget=OPENING_PREMOVE_FUTURE_NODE_BUDGET,
+                                                clear_existing=False
+                                            )
+                                        )
+
+                                        if future_stats.get("prepared", 0) > 0:
+                                            print(
+                                                "[PREMOVE] EXTENDED | "
+                                                f"positions={future_stats['positions']} "
+                                                f"| prepared={future_stats['prepared']} "
+                                                f"| nodes={future_stats['nodes']} "
+                                                f"| remaining_bot_moves={remaining_bot_moves}"
+                                            )
+
                                 pending_bot_moves[
                                     position_key
                                 ] = {
@@ -11562,8 +11683,12 @@ def main():
                                     "selection_meta": selection_meta,
                                     "tempo_delay": None,
                                     "tempo_from_book": (
-                                        selection_meta.get("source") == "GM_BOOK"
+                                        True
+                                        if selection_meta.get("source")
+                                        in ("GM_BOOK", "BOOK_PREMOVE")
+                                        else False
                                     ),
+                                    "is_opening_premove": is_opening_premove,
                                 }
 
                                 if pending_entry is not None:
@@ -11693,7 +11818,10 @@ def main():
 
                                 pending_recovery = None
 
-                                if pending_entry is not None:
+                                if (
+                                    pending_entry is not None
+                                    and not is_opening_premove
+                                ):
                                     pending_recovery = periodic_full_board_catchup_scan(
                                         sct,
                                         scrcpy_hwnd,
@@ -11763,6 +11891,7 @@ def main():
                                     not verified
                                     and best_move.promotion is not None
                                     and pending_entry is not None
+                                    and not is_opening_premove
                                 ):
                                     promotion_recovered = select_promotion_piece(
                                         sct,
@@ -11945,7 +12074,8 @@ def main():
                                             continue
 
                                 if (
-                                    stockfish_moves_since_buffer
+                                    not is_opening_premove
+                                    and stockfish_moves_since_buffer
                                     >= next_buffer_after
                                 ):
                                     buffer_delay = random.choice(
@@ -11984,11 +12114,18 @@ def main():
                                             selection_meta.get("source") == "GM_BOOK"
                                         )
 
-                                        tempo_delay = human_like_move_delay(
-                                            board,
-                                            best_move,
-                                            from_book=tempo_from_book
-                                        )
+                                        if (
+                                            selection_meta.get("source")
+                                            == "BOOK_PREMOVE"
+                                        ):
+                                            tempo_delay = 0.0
+                                            tempo_from_book = True
+                                        else:
+                                            tempo_delay = human_like_move_delay(
+                                                board,
+                                                best_move,
+                                                from_book=tempo_from_book
+                                            )
 
                                         pending_bot_moves[position_key][
                                             "tempo_delay"
@@ -12240,6 +12377,12 @@ def main():
                                         None
                                     )
 
+                                    if is_opening_premove:
+                                        opening_premove_cache.pop(
+                                            position_key,
+                                            None
+                                        )
+
                                     last_bot_position_key = None
                                     next_main_turn_rescan = time.perf_counter() + TURN_RESCAN_INTERVAL
 
@@ -12266,7 +12409,8 @@ def main():
                                             "[HUMAN TEMPO] COMPLETE | "
                                             f"move={best_san} "
                                             f"think={tempo_delay:.3f}s "
-                                            f"source={'BOOK' if tempo_from_book else 'ENGINE'}"
+                                            f"source="
+                                            f"{'BOOK-PREMOVE' if is_opening_premove else 'BOOK' if tempo_from_book else 'ENGINE'}"
                                         )
 
                                 else:
