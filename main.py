@@ -2869,47 +2869,60 @@ def release_physical_opening_drag(
 
 
 def capture_screen(sct, hwnd=None):
-    if hwnd and user32 and user32.IsWindow(hwnd):
-        rect = wintypes.RECT()
+    """Capture scrcpy safely; transient Windows BitBlt failures are recoverable."""
+    for attempt in range(2):
+        try:
+            if hwnd and user32 and user32.IsWindow(hwnd):
+                rect = wintypes.RECT()
 
-        user32.GetClientRect(
-            hwnd,
-            ctypes.byref(rect)
-        )
+                user32.GetClientRect(
+                    hwnd,
+                    ctypes.byref(rect)
+                )
 
-        point = wintypes.POINT(
-            rect.left,
-            rect.top
-        )
+                point = wintypes.POINT(
+                    rect.left,
+                    rect.top
+                )
 
-        user32.ClientToScreen(
-            hwnd,
-            ctypes.byref(point)
-        )
+                user32.ClientToScreen(
+                    hwnd,
+                    ctypes.byref(point)
+                )
 
-        width = rect.right - rect.left
-        height = rect.bottom - rect.top
+                width = rect.right - rect.left
+                height = rect.bottom - rect.top
 
-        if width <= 0 or height <= 0:
+                if width <= 0 or height <= 0:
+                    return None
+
+                raw = np.asarray(
+                    sct.grab({
+                        "left": point.x,
+                        "top": point.y,
+                        "width": width,
+                        "height": height
+                    })
+                )
+
+            else:
+                raw = np.asarray(
+                    sct.grab(
+                        sct.monitors[1]
+                    )
+                )
+
+            return raw[:, :, :3].copy()
+
+        except Exception:
+            # Windows GDI/MSS can occasionally throw a transient BitBlt
+            # ScreenShotError. Do not terminate the chess process.
+            if attempt == 0:
+                time.sleep(0.001)
+                continue
             return None
 
-        raw = np.asarray(
-            sct.grab({
-                "left": point.x,
-                "top": point.y,
-                "width": width,
-                "height": height
-            })
-        )
-
-    else:
-        raw = np.asarray(
-            sct.grab(
-                sct.monitors[1]
-            )
-        )
-
-    return raw[:, :, :3].copy()
+    return None
 
 
 def classify_square(
@@ -13816,6 +13829,27 @@ def main():
                 )
 
         finally:
+            # Never leave a physical premove mouse button held if the program
+            # exits, the screen capture fails repeatedly, or another exception
+            # reaches the main loop.
+            try:
+                if opening_premove_armed is not None:
+                    release_physical_opening_drag(
+                        opening_premove_armed
+                    )
+                    opening_premove_armed = None
+            except Exception:
+                try:
+                    user32.mouse_event(
+                        MOUSEEVENTF_LEFTUP,
+                        0,
+                        0,
+                        0,
+                        0
+                    )
+                except Exception:
+                    pass
+
             cv2.destroyAllWindows()
 
             try:
