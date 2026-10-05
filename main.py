@@ -48,6 +48,35 @@ CLICK_CURSOR_SETTLE_MAX = 0.0
 CLICK_HOLD_MIN = 0.0
 CLICK_HOLD_MAX = 0.0
 
+# Elite fast-play tempo layer.
+# This does NOT change move selection or board verification. It only adds
+# natural timing variation before a confirmed Stockfish move is clicked.
+#
+# The distribution is intentionally heavy toward short/normal thinks, with
+# occasional longer thinks. Position features then nudge the delay up/down.
+HUMAN_TEMPO_ENABLED = True
+HUMAN_TEMPO_FAST_CHANCE = 0.17
+HUMAN_TEMPO_NORMAL_CHANCE = 0.58
+HUMAN_TEMPO_DEEP_CHANCE = 0.20
+HUMAN_TEMPO_LONG_CHANCE = 0.05
+
+HUMAN_TEMPO_FAST_RANGE = (0.16, 0.34)
+HUMAN_TEMPO_NORMAL_RANGE = (0.34, 0.78)
+HUMAN_TEMPO_DEEP_RANGE = (0.78, 1.45)
+HUMAN_TEMPO_LONG_RANGE = (1.45, 2.70)
+
+HUMAN_TEMPO_OPENING_MAX = 0.60
+HUMAN_TEMPO_CAPTURE_MULT = 1.10
+HUMAN_TEMPO_CHECK_MULT = 1.15
+HUMAN_TEMPO_PROMOTION_MULT = 1.25
+HUMAN_TEMPO_TACTICAL_MULT = 1.08
+HUMAN_TEMPO_QUIET_MULT = 0.94
+HUMAN_TEMPO_RANDOM_JITTER = 0.07
+
+# Human-like source -> destination handoff. This stays small enough to keep
+# the bot responsive while avoiding an obviously fixed machine interval.
+HUMAN_CLICK_GAP_RANGE = (0.035, 0.095)
+
 # Before the destination click, verify that the SOURCE square itself was
 # actually selected. This prevents a bad source click (for example selecting
 # a queen when Stockfish asked for a bishop) from turning into a legal but
@@ -3598,6 +3627,109 @@ def _verify_source_click_selected(
     return False, last_reason
 
 
+def human_like_move_delay(
+    board,
+    move,
+    from_book=False
+):
+    """
+    Sample a human-like think delay for one already-selected move.
+
+    The profile is inspired by elite fast-play tempo rather than a literal
+    imitation of any specific player's timing. Most moves are quick; tactical
+    and forcing moves receive longer thinking windows; occasional long thinks
+    prevent the timing pattern from becoming uniform.
+    """
+    if not HUMAN_TEMPO_ENABLED:
+        return 0.0
+
+    # Book moves are generally played faster, but not at one fixed speed.
+    if from_book:
+        fast_range = (
+            HUMAN_TEMPO_FAST_RANGE[0],
+            min(
+                HUMAN_TEMPO_OPENING_MAX,
+                HUMAN_TEMPO_FAST_RANGE[1] + 0.08
+            )
+        )
+        if random.random() < 0.78:
+            delay = random.uniform(*fast_range)
+        else:
+            delay = random.uniform(
+                HUMAN_TEMPO_NORMAL_RANGE[0],
+                min(HUMAN_TEMPO_OPENING_MAX + 0.22, HUMAN_TEMPO_NORMAL_RANGE[1])
+            )
+    else:
+        roll = random.random()
+
+        if roll < HUMAN_TEMPO_FAST_CHANCE:
+            delay = random.uniform(*HUMAN_TEMPO_FAST_RANGE)
+        elif roll < (
+            HUMAN_TEMPO_FAST_CHANCE
+            + HUMAN_TEMPO_NORMAL_CHANCE
+        ):
+            delay = random.uniform(*HUMAN_TEMPO_NORMAL_RANGE)
+        elif roll < (
+            HUMAN_TEMPO_FAST_CHANCE
+            + HUMAN_TEMPO_NORMAL_CHANCE
+            + HUMAN_TEMPO_DEEP_CHANCE
+        ):
+            delay = random.uniform(*HUMAN_TEMPO_DEEP_RANGE)
+        else:
+            delay = random.uniform(*HUMAN_TEMPO_LONG_RANGE)
+
+    # Position-aware modifiers.
+    try:
+        if board.is_capture(move):
+            delay *= HUMAN_TEMPO_CAPTURE_MULT
+
+        if board.gives_check(move):
+            delay *= HUMAN_TEMPO_CHECK_MULT
+
+        if move.promotion is not None:
+            delay *= HUMAN_TEMPO_PROMOTION_MULT
+
+        # Busy positions naturally deserve a little more thought.
+        legal_count = board.legal_moves.count()
+
+        if legal_count <= 12:
+            delay *= HUMAN_TEMPO_TACTICAL_MULT
+        elif legal_count >= 35:
+            delay *= HUMAN_TEMPO_QUIET_MULT
+
+        # Opening tempo: keep the first handful of moves snappy.
+        if len(board.move_stack) < 12:
+            delay = min(
+                delay,
+                HUMAN_TEMPO_OPENING_MAX
+            )
+    except Exception:
+        # Timing must never break move execution if a board probe fails.
+        pass
+
+    # Small final jitter prevents repeated identical-looking intervals.
+    delay += random.uniform(
+        -HUMAN_TEMPO_RANDOM_JITTER,
+        HUMAN_TEMPO_RANDOM_JITTER
+    )
+
+    return max(
+        0.12,
+        min(
+            HUMAN_TEMPO_LONG_RANGE[1],
+            delay
+        )
+    )
+
+
+def human_like_click_gap():
+    """Return a small variable pickup-to-drop interval."""
+    return random.uniform(
+        HUMAN_CLICK_GAP_RANGE[0],
+        HUMAN_CLICK_GAP_RANGE[1]
+    )
+
+
 def click_move(
     move,
     board_coords,
@@ -3677,7 +3809,9 @@ def click_move(
                 f"{move.uci()} | {source_reason} | continuing to target"
             )
 
-    time.sleep(0.012)
+    time.sleep(
+        human_like_click_gap()
+    )
 
     if not left_click_screen(
         tx,
@@ -11552,6 +11686,26 @@ def main():
                                         "[VALIDATION] PRE-CLICK PASS | "
                                         "physical board matches internal board 64/64"
                                     )
+
+                                    tempo_from_book = (
+                                        selection_meta.get("source") == "GM_BOOK"
+                                    )
+
+                                    tempo_delay = human_like_move_delay(
+                                        board,
+                                        best_move,
+                                        from_book=tempo_from_book
+                                    )
+
+                                    print(
+                                        "[HUMAN TEMPO] "
+                                        f"think={tempo_delay:.3f}s "
+                                        f"move={best_san} "
+                                        f"source={'BOOK' if tempo_from_book else 'ENGINE'}"
+                                    )
+
+                                    if tempo_delay > 0.0:
+                                        time.sleep(tempo_delay)
 
                                     clicked = click_move(
                                         best_move,
