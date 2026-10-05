@@ -7,7 +7,6 @@ import os
 import time
 import random
 import math
-from collections import deque
 import chess
 import chess.engine
 
@@ -48,67 +47,6 @@ CLICK_CURSOR_SETTLE_MIN = 0.0
 CLICK_CURSOR_SETTLE_MAX = 0.0
 CLICK_HOLD_MIN = 0.0
 CLICK_HOLD_MAX = 0.0
-
-# Elite fast-play tempo layer.
-# This does NOT change move selection or board verification. It only adds
-# natural timing variation before a confirmed Stockfish move is clicked.
-#
-# The distribution is intentionally heavy toward short/normal thinks, with
-# occasional longer thinks. Position features then nudge the delay up/down.
-HUMAN_TEMPO_ENABLED = True
-HUMAN_TEMPO_FAST_CHANCE = 0.17
-HUMAN_TEMPO_NORMAL_CHANCE = 0.58
-HUMAN_TEMPO_DEEP_CHANCE = 0.20
-HUMAN_TEMPO_LONG_CHANCE = 0.05
-
-HUMAN_TEMPO_FAST_RANGE = (0.16, 0.34)
-HUMAN_TEMPO_NORMAL_RANGE = (0.34, 0.78)
-HUMAN_TEMPO_DEEP_RANGE = (0.78, 1.45)
-HUMAN_TEMPO_LONG_RANGE = (1.45, 2.70)
-
-HUMAN_TEMPO_OPENING_MAX = 0.60
-HUMAN_TEMPO_CAPTURE_MULT = 1.10
-HUMAN_TEMPO_CHECK_MULT = 1.15
-HUMAN_TEMPO_PROMOTION_MULT = 1.25
-HUMAN_TEMPO_TACTICAL_MULT = 1.08
-HUMAN_TEMPO_QUIET_MULT = 0.94
-HUMAN_TEMPO_RANDOM_JITTER = 0.07
-
-# Human-like source -> destination handoff. This stays small enough to keep
-# the bot responsive while avoiding an obviously fixed machine interval.
-HUMAN_CLICK_GAP_RANGE = (0.035, 0.095)
-
-# Opening premove preparation.
-# Moves are prepared by exact FEN, but the confirmed python-chess board is
-# NEVER advanced for a future move until physical verification succeeds.
-OPENING_PREMOVE_ENABLED = True
-OPENING_PREMOVE_MAX_BOT_MOVES = 5
-OPENING_PREMOVE_MAX_TOTAL_PLIES = 10
-OPENING_PREMOVE_MAX_NODES = 600
-OPENING_PREMOVE_FUTURE_NODE_BUDGET = 400
-OPENING_PREMOVE_MAX_AGE = 180.0
-
-# Physical/native premove queue.
-# One rolling bot response is physically staged before the predicted human
-# move. The opening tree can prepare many future branches, but only the next
-# bot move is deterministic until the real human move is known.
-OPENING_PREMOVE_PHYSICAL_ENABLED = True
-OPENING_PREMOVE_PHYSICAL_GAP = 0.001
-# Strict rule: once the real opponent move is detected, the armed premove
-# must physically appear within 1.0 second or it is considered failed.
-OPENING_PREMOVE_PHYSICAL_WAIT = 1.000
-OPENING_PREMOVE_PHYSICAL_MAX_AGE = 15.0
-
-# Before calling a premove "armed", verify that the board UI actually reacted
-# to both source and destination clicks while the underlying piece placement
-# stayed unchanged.
-OPENING_PREMOVE_ARM_CONFIRM_WAIT = 0.080
-OPENING_PREMOVE_ARM_CHANGE_MIN = 0.0010
-
-# Tempo rhythm state. A mode lasts for several moves so the player has a
-# natural rhythm instead of independently re-rolling a delay every move.
-_human_tempo_mode = None
-_human_tempo_mode_moves_left = 0
 
 # Before the destination click, verify that the SOURCE square itself was
 # actually selected. This prevents a bad source click (for example selecting
@@ -3660,572 +3598,6 @@ def _verify_source_click_selected(
     return False, last_reason
 
 
-def _top_book_candidate(gm_book, board):
-    """Return the highest-weight legal book move."""
-    try:
-        choice = gm_book.choose(board)
-    except Exception:
-        return None
-
-    if not choice:
-        return None
-
-    candidates = list(
-        choice.get("candidates") or []
-    )
-
-    if not candidates:
-        return None
-
-    candidates.sort(
-        key=lambda item: (
-            -float(item.get("weight", 0.0)),
-            item["move"].uci()
-        )
-    )
-
-    return {
-        "move": candidates[0]["move"],
-        "weight": float(candidates[0].get("weight", 0.0)),
-        "rank": 1,
-        "entries": len(candidates),
-    }
-
-
-def prepare_opening_premove_cache(
-    gm_book,
-    root_board,
-    stockfish_color,
-    cache,
-    max_bot_moves=None,
-    node_budget=None,
-    clear_existing=False
-):
-    """
-    Prepare a bounded opening-book decision tree keyed by exact FEN.
-
-    Human moves are deliberately NOT pushed into the real board. Each legal
-    human reply is explored on a temporary board; if that resulting position
-    has a book move for Stockfish, that response is cached.
-    """
-    if (
-        not OPENING_PREMOVE_ENABLED
-        or gm_book is None
-        or root_board is None
-        or stockfish_color not in (chess.WHITE, chess.BLACK)
-    ):
-        return {
-            "positions": 0,
-            "prepared": 0,
-            "nodes": 0,
-            "root": None,
-        }
-
-    if max_bot_moves is None:
-        max_bot_moves = OPENING_PREMOVE_MAX_BOT_MOVES
-
-    if node_budget is None:
-        node_budget = OPENING_PREMOVE_MAX_NODES
-
-    max_bot_moves = max(1, int(max_bot_moves))
-    node_budget = max(1, int(node_budget))
-
-    if clear_existing:
-        cache.clear()
-
-    work = deque()
-    work.append(
-        (
-            root_board.copy(stack=False),
-            0
-        )
-    )
-
-    visited = set()
-    prepared = 0
-    nodes = 0
-
-    while work and nodes < node_budget:
-        current_board, bot_depth = work.popleft()
-        nodes += 1
-
-        if bot_depth > max_bot_moves:
-            continue
-
-        fen = current_board.fen()
-        visit_key = (fen, bot_depth)
-
-        if visit_key in visited:
-            continue
-
-        visited.add(visit_key)
-
-        if current_board.is_game_over():
-            continue
-
-        if current_board.turn == stockfish_color:
-            if bot_depth >= max_bot_moves:
-                continue
-
-            candidate = _top_book_candidate(
-                gm_book,
-                current_board
-            )
-
-            if candidate is None:
-                continue
-
-            move = candidate["move"]
-
-            if move not in current_board.legal_moves:
-                continue
-
-            next_depth = bot_depth + 1
-
-            if fen not in cache:
-                cache[fen] = {
-                    "uci": move.uci(),
-                    "san": current_board.san(move),
-                    "weight": candidate["weight"],
-                    "rank": candidate["rank"],
-                    "entries": candidate["entries"],
-                    "depth": next_depth,
-                    "created_at": time.perf_counter(),
-                }
-                prepared += 1
-
-            if next_depth >= max_bot_moves:
-                continue
-
-            after = expected_board_after_move(
-                current_board,
-                move
-            )
-
-            work.append(
-                (
-                    after,
-                    next_depth
-                )
-            )
-
-        else:
-            if bot_depth >= max_bot_moves:
-                continue
-
-            # Human move is unknown. Explore every legal reply on a temporary
-            # board so the next Stockfish response can be ready by exact FEN.
-            for human_move in list(
-                current_board.legal_moves
-            ):
-                human_board = expected_board_after_move(
-                    current_board,
-                    human_move
-                )
-
-                work.append(
-                    (
-                        human_board,
-                        bot_depth
-                    )
-                )
-
-    return {
-        "positions": len(cache),
-        "prepared": prepared,
-        "nodes": nodes,
-        "root": root_board.fen(),
-    }
-
-
-def get_opening_premove(
-    cache,
-    board
-):
-    if (
-        not OPENING_PREMOVE_ENABLED
-        or board is None
-        or len(board.move_stack) > OPENING_PREMOVE_MAX_TOTAL_PLIES
-    ):
-        return None
-
-    fen = board.fen()
-    entry = cache.get(fen)
-
-    if entry is None:
-        return None
-
-    created_at = float(
-        entry.get("created_at", 0.0)
-    )
-
-    if (
-        created_at > 0.0
-        and time.perf_counter() - created_at
-        > OPENING_PREMOVE_MAX_AGE
-    ):
-        cache.pop(
-            fen,
-            None
-        )
-        return None
-
-    try:
-        move = chess.Move.from_uci(
-            entry["uci"]
-        )
-    except Exception:
-        cache.pop(
-            fen,
-            None
-        )
-        return None
-
-    if move not in board.legal_moves:
-        cache.pop(
-            fen,
-            None
-        )
-        return None
-
-    return entry
-
-
-
-def arm_physical_opening_premove(
-    sct,
-    cache,
-    board,
-    predicted_human_uci,
-    board_coords,
-    black_perspective,
-    scrcpy_hwnd
-):
-    """Physically queue the next opening reply before the human moves.
-
-    The human move is only a prediction used to select the opening response.
-    The confirmed python-chess board is never changed here. The native game UI
-    receives the source+destination clicks so it can hold the move as a
-    premove until the opponent move is made.
-    """
-    if (
-        not OPENING_PREMOVE_PHYSICAL_ENABLED
-        or not OPENING_PREMOVE_ENABLED
-        or cache is None
-        or board is None
-        or predicted_human_uci is None
-        or board_coords is None
-        or black_perspective is None
-    ):
-        return None
-
-    try:
-        predicted_human = chess.Move.from_uci(
-            predicted_human_uci
-        )
-    except Exception:
-        return None
-
-    if predicted_human not in board.legal_moves:
-        return None
-
-    predicted_after = expected_board_after_move(
-        board,
-        predicted_human
-    )
-
-    premove_entry = get_opening_premove(
-        cache,
-        predicted_after
-    )
-
-    if premove_entry is None:
-        return None
-
-    try:
-        bot_move = chess.Move.from_uci(
-            premove_entry["uci"]
-        )
-    except Exception:
-        return None
-
-    if bot_move not in predicted_after.legal_moves:
-        return None
-
-    if not focus_scrcpy(scrcpy_hwnd):
-        return None
-
-    screen_origin = get_scrcpy_screen_origin(
-        scrcpy_hwnd
-    )
-    if screen_origin is None:
-        return None
-
-    try:
-        sx, sy = square_screen_center(
-            bot_move.from_square,
-            board_coords,
-            black_perspective,
-            scrcpy_hwnd,
-            screen_origin=screen_origin
-        )
-
-        tx, ty = square_screen_center(
-            bot_move.to_square,
-            board_coords,
-            black_perspective,
-            scrcpy_hwnd,
-            screen_origin=screen_origin
-        )
-
-        print(
-            "[PREMOVE-QUEUE] STAGING | "
-            f"predicted_human={predicted_human.uci()} "
-            f"| bot={bot_move.uci()} {premove_entry['san']} "
-            f"| source=({sx},{sy}) target=({tx},{ty})"
-        )
-
-        # Native premove is intentionally armed early:
-        # source click -> destination click, BEFORE the opponent moves.
-        # Do not validate selection graphics here. The opponent move remains
-        # subject to the normal human verification pipeline, and the queued
-        # Stockfish move is verified only after that human move is verified.
-
-        user32.SetCursorPos(0, 0)
-
-        if not left_click_screen(
-            sx,
-            sy,
-            hold_seconds=0.0
-        ):
-            print(
-                "[PREMOVE-QUEUE] SOURCE DISPATCH FAILED | "
-                f"{bot_move.uci()}"
-            )
-            return None
-
-        time.sleep(
-            OPENING_PREMOVE_PHYSICAL_GAP
-        )
-
-        if not left_click_screen(
-            tx,
-            ty,
-            hold_seconds=0.0
-        ):
-            print(
-                "[PREMOVE-QUEUE] DESTINATION DISPATCH FAILED | "
-                f"{bot_move.uci()}"
-            )
-            return None
-
-        user32.SetCursorPos(0, 0)
-
-        print(
-            "[PREMOVE-QUEUE] ARMED | "
-            f"predicted_human={predicted_human.uci()} "
-            f"| bot={bot_move.uci()} {premove_entry['san']} "
-            "| waiting for real human move + normal verification"
-        )
-
-        return {
-            "current_fen": board.fen(),
-            "predicted_human_uci": predicted_human.uci(),
-            "post_human_fen": predicted_after.fen(),
-            "bot_uci": bot_move.uci(),
-            "bot_san": premove_entry["san"],
-            "depth": int(premove_entry.get("depth", 0)),
-            "created_at": time.perf_counter(),
-        }
-
-
-def wait_for_physical_opening_premove(
-    sct,
-    hwnd,
-    board,
-    move,
-    board_coords,
-    black_perspective,
-    timeout=OPENING_PREMOVE_PHYSICAL_WAIT
-):
-    """Confirm that a previously queued native premove has landed."""
-    expected_after = expected_board_after_move(
-        board,
-        move
-    )
-
-    deadline = (
-        time.perf_counter()
-        + max(
-            0.0,
-            float(timeout)
-        )
-    )
-
-    last_reason = (
-        "physical premove post-state not yet confirmed"
-    )
-
-    while time.perf_counter() < deadline:
-        frame = capture_screen(
-            sct,
-            hwnd
-        )
-
-        if frame is None:
-            time.sleep(
-                BOT_RECOVERY_POLL
-            )
-            continue
-
-        ok, reason = full_board_state_confirmed(
-            frame,
-            expected_after,
-            board_coords,
-            black_perspective
-        )
-
-        if ok:
-            return (
-                True,
-                frame,
-                reason
-            )
-
-        last_reason = reason
-        time.sleep(
-            BOT_RECOVERY_POLL
-        )
-
-    return (
-        False,
-        None,
-        last_reason
-    )
-
-
-def human_like_move_delay(
-    board,
-    move,
-    from_book=False
-):
-    """
-    Sample an elite-fast-play-inspired human tempo.
-
-    The key difference from simple random timing is rhythm: the bot enters a
-    short fast streak, normal streak, or occasional think phase and keeps that
-    tempo for several moves. Tactical/forcing moves can still override the
-    rhythm upward.
-    """
-    global _human_tempo_mode
-    global _human_tempo_mode_moves_left
-
-    if not HUMAN_TEMPO_ENABLED:
-        return 0.0
-
-    # Fresh-game reset. The first Stockfish move of a game can occur either
-    # from move_stack 0 (Stockfish is White) or 1 (human White moved first).
-    if len(board.move_stack) <= 1:
-        _human_tempo_mode = None
-        _human_tempo_mode_moves_left = 0
-
-    # Start a new tempo phase only when the previous phase expires.
-    if (
-        _human_tempo_mode is None
-        or _human_tempo_mode_moves_left <= 0
-    ):
-        roll = random.random()
-
-        if from_book and roll < 0.72:
-            _human_tempo_mode = "FAST"
-            _human_tempo_mode_moves_left = random.randint(2, 5)
-        elif roll < 0.46:
-            _human_tempo_mode = "FAST"
-            _human_tempo_mode_moves_left = random.randint(2, 5)
-        elif roll < 0.83:
-            _human_tempo_mode = "NORMAL"
-            _human_tempo_mode_moves_left = random.randint(2, 4)
-        elif roll < 0.94:
-            _human_tempo_mode = "BURST"
-            _human_tempo_mode_moves_left = random.randint(1, 2)
-        else:
-            _human_tempo_mode = "DEEP"
-            _human_tempo_mode_moves_left = random.randint(1, 2)
-
-    mode = _human_tempo_mode
-
-    if mode == "FAST":
-        delay = random.uniform(0.18, 0.46)
-    elif mode == "BURST":
-        delay = random.uniform(0.12, 0.28)
-    elif mode == "DEEP":
-        delay = random.uniform(1.10, 2.15)
-    else:
-        delay = random.uniform(0.40, 0.92)
-
-    # Book moves get a slightly snappier baseline without becoming identical.
-    if from_book:
-        delay *= random.uniform(0.78, 0.94)
-
-    # Position-aware modifiers.
-    try:
-        if board.is_capture(move):
-            delay *= HUMAN_TEMPO_CAPTURE_MULT
-
-        if board.gives_check(move):
-            delay *= HUMAN_TEMPO_CHECK_MULT
-
-        if move.promotion is not None:
-            delay *= HUMAN_TEMPO_PROMOTION_MULT
-
-        legal_count = board.legal_moves.count()
-
-        if legal_count <= 12:
-            delay *= HUMAN_TEMPO_TACTICAL_MULT
-        elif legal_count >= 35:
-            delay *= HUMAN_TEMPO_QUIET_MULT
-
-        # A forcing move can break a long deep think: even when the current
-        # rhythm is FAST, checks/captures are allowed to become more deliberate.
-        if (
-            (board.is_capture(move) or board.gives_check(move))
-            and delay < 0.30
-        ):
-            delay += random.uniform(0.08, 0.22)
-
-        # Opening stays quick.
-        if len(board.move_stack) < 12:
-            delay = min(
-                delay,
-                HUMAN_TEMPO_OPENING_MAX
-            )
-    except Exception:
-        pass
-
-    # Small jitter is intentionally much smaller than the rhythm differences.
-    delay += random.uniform(
-        -HUMAN_TEMPO_RANDOM_JITTER,
-        HUMAN_TEMPO_RANDOM_JITTER
-    )
-
-    _human_tempo_mode_moves_left -= 1
-
-    return max(
-        0.12,
-        min(
-            HUMAN_TEMPO_LONG_RANGE[1],
-            delay
-        )
-    )
-
-def human_like_click_gap():
-    """Return a small variable pickup-to-drop interval."""
-    return random.uniform(
-        HUMAN_CLICK_GAP_RANGE[0],
-        HUMAN_CLICK_GAP_RANGE[1]
-    )
-
-
 def click_move(
     move,
     board_coords,
@@ -4305,9 +3677,7 @@ def click_move(
                 f"{move.uci()} | {source_reason} | continuing to target"
             )
 
-    time.sleep(
-        human_like_click_gap()
-    )
+    time.sleep(0.012)
 
     if not left_click_screen(
         tx,
@@ -8459,20 +7829,12 @@ def build_analysis(
         )
 
         pv = []
-        next_human_move = None
-        after_pv = after_info.get("pv", [])
-
-        if after_pv:
-            try:
-                candidate_next_human = after_pv[0]
-                if candidate_next_human in after_board.legal_moves:
-                    next_human_move = candidate_next_human
-            except Exception:
-                next_human_move = None
-
         temp = after_board.copy()
 
-        for pv_move in after_pv[:6]:
+        for pv_move in after_info.get(
+            "pv",
+            []
+        )[:6]:
             if pv_move not in temp.legal_moves:
                 break
 
@@ -8504,11 +7866,6 @@ def build_analysis(
                 best_move.uci()
                 if best_move is not None
                 else "-"
-            ),
-            "next_human_move": (
-                next_human_move.uci()
-                if next_human_move is not None
-                else None
             ),
             "depth": after_info.get(
                 "depth",
@@ -10490,9 +9847,6 @@ def main():
     last_bot_position_key = None
     pending_bot_moves = {}
     pending_recovered_human = None
-    opening_premove_cache = {}
-    opening_premove_board_id = None
-    opening_premove_armed = None
     next_main_turn_rescan = time.perf_counter() + TURN_RESCAN_INTERVAL
     visual_black_perspective = False
     stockfish_color = None
@@ -10749,9 +10103,6 @@ def main():
 
                             if startup_new_game is not None:
                                 board = startup_new_game["board"]
-                                opening_premove_cache.clear()
-                                opening_premove_armed = None
-                                opening_premove_board_id = None
                                 visual_black_perspective = (
                                     startup_new_game["perspective"]
                                 )
@@ -11200,9 +10551,6 @@ def main():
 
                         if new_game is not None:
                             board = new_game["board"]
-                            opening_premove_cache.clear()
-                            opening_premove_armed = None
-                            opening_premove_board_id = None
 
                             visual_black_perspective = (
                                 new_game["perspective"]
@@ -11389,82 +10737,10 @@ def main():
                     and stockfish_color is not None
                     and not match_ui.get("screen_guard")
                 ):
-                    # Build the opening premove tree once for this new game
-                    # object. This uses temporary python-chess boards only;
-                    # the confirmed physical/virtual board is untouched.
-                    current_board_id = id(board)
-
-                    if (
-                        OPENING_PREMOVE_ENABLED
-                        and len(board.move_stack)
-                        <= OPENING_PREMOVE_MAX_TOTAL_PLIES
-                        and current_board_id != opening_premove_board_id
-                    ):
-                        opening_premove_cache.clear()
-                        opening_premove_armed = None
-
-                        premove_stats = (
-                            prepare_opening_premove_cache(
-                                gm_book,
-                                board,
-                                stockfish_color,
-                                opening_premove_cache,
-                                max_bot_moves=OPENING_PREMOVE_MAX_BOT_MOVES,
-                                node_budget=OPENING_PREMOVE_MAX_NODES,
-                                clear_existing=False
-                            )
-                        )
-
-                        opening_premove_board_id = current_board_id
-
-                        if premove_stats.get("prepared", 0) > 0:
-                            print(
-                                "[PREMOVE] READY | "
-                                f"positions={premove_stats['positions']} "
-                                f"| prepared={premove_stats['prepared']} "
-                                f"| nodes={premove_stats['nodes']} "
-                                f"| max_bot_moves={OPENING_PREMOVE_MAX_BOT_MOVES}"
-                            )
-
                     if (
                         board.turn == human_color
                         and not bot_thinking
                     ):
-                        # Physically stage the next opening response while the
-                        # human is still deciding. The predicted human move comes
-                        # from the post-move analysis of the previously confirmed
-                        # Stockfish move; the real board is never advanced here.
-                        if (
-                            OPENING_PREMOVE_PHYSICAL_ENABLED
-                            and opening_premove_armed is None
-                            and next_human_best_uci is not None
-                        ):
-                            staged_premove = (
-                                arm_physical_opening_premove(
-                                    sct,
-                                    opening_premove_cache,
-                                    board,
-                                    next_human_best_uci,
-                                    cached_board_coords,
-                                    visual_black_perspective,
-                                    scrcpy_hwnd
-                                )
-                            )
-
-                            if staged_premove is not None:
-                                opening_premove_armed = (
-                                    staged_premove
-                                )
-                                print(
-                                    "[PREMOVE-QUEUE] ARMED | "
-                                    f"predicted_human="
-                                    f"{staged_premove['predicted_human_uci']} "
-                                    f"| bot="
-                                    f"{staged_premove['bot_uci']} "
-                                    f"{staged_premove['bot_san']} "
-                                    "| waiting for real human move"
-                                )
-
                         progress(
                             "WAIT",
                             (
@@ -11557,78 +10833,6 @@ def main():
                                 move
                             )
 
-                            # The premove is already physically queued BEFORE
-                            # the opponent moves. We only remember whether the
-                            # detected human move matches that prediction here.
-                            # The actual human move must still pass the SAME
-                            # physical verification path as before.
-                            premove_prediction_match = False
-                            armed_bot_move = None
-                            premove_combo_ok = False
-                            premove_combo_frame = None
-                            premove_combo_reason = ""
-                            premove_combo_elapsed = None
-
-                            if opening_premove_armed is not None:
-                                armed_age = (
-                                    time.perf_counter()
-                                    - float(
-                                        opening_premove_armed.get(
-                                            "created_at",
-                                            time.perf_counter()
-                                        )
-                                    )
-                                )
-
-                                if (
-                                    armed_age
-                                    > OPENING_PREMOVE_PHYSICAL_MAX_AGE
-                                ):
-                                    print(
-                                        "[PREMOVE-QUEUE] EXPIRED | "
-                                        f"bot={opening_premove_armed.get('bot_uci','-')}"
-                                    )
-                                    opening_premove_armed = None
-
-                                elif (
-                                    move.uci()
-                                    == opening_premove_armed.get(
-                                        "predicted_human_uci"
-                                    )
-                                ):
-                                    try:
-                                        candidate_bot_move = (
-                                            chess.Move.from_uci(
-                                                opening_premove_armed["bot_uci"]
-                                            )
-                                        )
-
-                                        if (
-                                            candidate_bot_move
-                                            in expected_human_board.legal_moves
-                                        ):
-                                            premove_prediction_match = True
-                                            armed_bot_move = candidate_bot_move
-
-                                            print(
-                                                "[PREMOVE-QUEUE] HUMAN MATCHED | "
-                                                f"human={move.uci()} "
-                                                f"| queued_bot={candidate_bot_move.uci()} "
-                                                "| verifying human first"
-                                            )
-                                    except Exception:
-                                        premove_prediction_match = False
-                                        armed_bot_move = None
-
-                                else:
-                                    print(
-                                        "[PREMOVE-QUEUE] CANCELLED | "
-                                        f"predicted_human="
-                                        f"{opening_premove_armed.get('predicted_human_uci','-')} "
-                                        f"| actual_human={move.uci()}"
-                                    )
-                                    opening_premove_armed = None
-
                             detection_source = getattr(
                                 detect_human_move,
                                 "_last_detection_source",
@@ -11636,61 +10840,7 @@ def main():
                             )
                             detect_human_move._last_detection_source = None
 
-                            if premove_combo_ok:
-                                final_human_ok = True
-                                final_human_frame = premove_combo_frame
-                                final_human_reason = (
-                                    "human move + prequeued Stockfish move "
-                                    "already physically confirmed | "
-                                    + premove_combo_reason
-                                )
-                                print(
-                                    "[PREMOVE-QUEUE] AUTO-EXECUTED | "
-                                    f"human={move.uci()} "
-                                    f"| bot={opening_premove_armed.get('bot_uci','-')} "
-                                    f"| combined board confirmed "
-                                    f"| fire_time={premove_combo_elapsed:.3f}s"
-                                )
-
-                                # The physical board is already ahead by the queued
-                                # Stockfish move. Commit BOTH confirmed moves now,
-                                # so the normal Stockfish click path is never entered.
-                                premove_bot_move = chess.Move.from_uci(
-                                    opening_premove_armed["bot_uci"]
-                                )
-
-                                board.push(move)
-                                board.push(premove_bot_move)
-
-                                opening_premove_cache.pop(
-                                    expected_human_board.fen(),
-                                    None
-                                )
-                                opening_premove_armed = None
-                                pending_bot_moves.clear()
-                                next_human_best_uci = None
-                                last_bot_position_key = None
-                                next_main_turn_rescan = (
-                                    time.perf_counter()
-                                    + TURN_RESCAN_INTERVAL
-                                )
-
-                                baseline_frame = (
-                                    premove_combo_frame
-                                    if premove_combo_frame is not None
-                                    else baseline_frame
-                                )
-
-                                print(
-                                    "[PREMOVE-QUEUE] COMMITTED | "
-                                    f"human={move.uci()} "
-                                    f"| bot={premove_bot_move.uci()} "
-                                    "| zero-delay next turn"
-                                )
-
-                                continue
-
-                            elif detection_source in (
+                            if detection_source in (
                                 "ULTRA_DELTA",
                                 "PERIODIC_FULL_RESCAN"
                             ):
@@ -11743,116 +10893,7 @@ def main():
                                 else move_frame
                             )
 
-                            # HUMAN is verified exactly as before first.
-                            # Only after that do we verify the already-queued bot
-                            # premove. No new bot click is performed here.
-                            if (
-                                premove_prediction_match
-                                and armed_bot_move is not None
-                                and opening_premove_armed is not None
-                            ):
-                                premove_wait_start = time.perf_counter()
-
-                                (
-                                    premove_combo_ok,
-                                    premove_combo_frame,
-                                    premove_combo_reason
-                                ) = wait_for_physical_opening_premove(
-                                    sct,
-                                    scrcpy_hwnd,
-                                    expected_human_board,
-                                    armed_bot_move,
-                                    cached_board_coords,
-                                    visual_black_perspective,
-                                    timeout=OPENING_PREMOVE_PHYSICAL_WAIT
-                                )
-
-                                premove_combo_elapsed = (
-                                    time.perf_counter()
-                                    - premove_wait_start
-                                )
-
-                                if premove_combo_ok:
-                                    print(
-                                        "[PREMOVE-QUEUE] AUTO-EXECUTED | "
-                                        f"human={move.uci()} "
-                                        f"| bot={armed_bot_move.uci()} "
-                                        f"| human_verify=PASS "
-                                        f"| bot_verify={premove_combo_elapsed:.3f}s"
-                                    )
-
-                                    before_premove_bot_board = (
-                                        expected_human_board.copy(
-                                            stack=False
-                                        )
-                                    )
-
-                                    board.push(
-                                        move
-                                    )
-                                    board.push(
-                                        armed_bot_move
-                                    )
-
-                                    analysis_state = build_analysis(
-                                        engine,
-                                        before_premove_bot_board,
-                                        board,
-                                        armed_bot_move,
-                                        best_info=None
-                                    )
-
-                                    if analysis_state:
-                                        predicted = analysis_state.get(
-                                            "next_human_move"
-                                        )
-                                        next_human_best_uci = (
-                                            predicted
-                                            if predicted
-                                            and predicted != "-"
-                                            else None
-                                        )
-                                    else:
-                                        next_human_best_uci = None
-
-                                    opening_premove_cache.pop(
-                                        expected_human_board.fen(),
-                                        None
-                                    )
-                                    opening_premove_armed = None
-                                    pending_bot_moves.clear()
-                                    last_bot_position_key = None
-                                    next_main_turn_rescan = (
-                                        time.perf_counter()
-                                        + TURN_RESCAN_INTERVAL
-                                    )
-
-                                    baseline_frame = (
-                                        premove_combo_frame
-                                        if premove_combo_frame is not None
-                                        else move_frame
-                                    )
-
-                                    print(
-                                        "[PREMOVE-QUEUE] COMMITTED | "
-                                        f"human={move.uci()} "
-                                        f"| bot={armed_bot_move.uci()} "
-                                        "| next premove can arm immediately"
-                                    )
-
-                                    continue
-
-                                print(
-                                    "[PREMOVE-QUEUE] TIMEOUT | "
-                                    f"bot={armed_bot_move.uci()} "
-                                    f"| waited={premove_combo_elapsed:.3f}s "
-                                    "| >1.000s => premove FAILED; normal bot path resumes"
-                                )
-
-                                opening_premove_armed = None
-
                             next_human_best_uci = None
-
 
                             board.push(
                                 move
@@ -11902,148 +10943,6 @@ def main():
                                     )
                                 )
 
-                                is_opening_premove = False
-                                physical_premove_pending = False
-
-                                # Prefer the physically staged native premove
-                                # when the confirmed board has reached the exact
-                                # predicted post-human FEN.
-                                if (
-                                    pending_entry is None
-                                    and opening_premove_armed is not None
-                                ):
-                                    armed = opening_premove_armed
-
-                                    armed_age = (
-                                        time.perf_counter()
-                                        - float(
-                                            armed.get(
-                                                "created_at",
-                                                time.perf_counter()
-                                            )
-                                        )
-                                    )
-
-                                    if (
-                                        armed_age
-                                        > OPENING_PREMOVE_PHYSICAL_MAX_AGE
-                                        or board.fen()
-                                        != armed.get("post_human_fen")
-                                    ):
-                                        if (
-                                            board.fen()
-                                            != armed.get("post_human_fen")
-                                        ):
-                                            print(
-                                                "[PREMOVE-QUEUE] INVALIDATED | "
-                                                f"board_fen changed before staged bot move | "
-                                                f"armed_bot={armed.get('bot_uci','-')}"
-                                            )
-                                        else:
-                                            print(
-                                                "[PREMOVE-QUEUE] EXPIRED | "
-                                                f"bot={armed.get('bot_uci','-')}"
-                                            )
-
-                                        opening_premove_armed = None
-
-                                    else:
-                                        try:
-                                            armed_move = (
-                                                chess.Move.from_uci(
-                                                    armed["bot_uci"]
-                                                )
-                                            )
-
-                                            if (
-                                                armed_move
-                                                in board.legal_moves
-                                            ):
-                                                is_opening_premove = True
-                                                physical_premove_pending = True
-                                                pending_entry = {
-                                                    "uci": armed_move.uci(),
-                                                    "san": armed["bot_san"],
-                                                    "result": None,
-                                                    "best_info_move": None,
-                                                    "selection_meta": {
-                                                        "rank": 0,
-                                                        "reason": (
-                                                            "PHYSICAL OPENING PREMOVE | "
-                                                            f"depth={armed.get('depth', 0)}/"
-                                                            f"{OPENING_PREMOVE_MAX_BOT_MOVES}"
-                                                        ),
-                                                        "source": "BOOK_PREMOVE_PHYSICAL",
-                                                        "book_entries": 0,
-                                                        "book_weight": 0.0,
-                                                    },
-                                                    "tempo_delay": 0.0,
-                                                    "tempo_from_book": True,
-                                                    "is_opening_premove": True,
-                                                }
-
-                                                print(
-                                                    "[PREMOVE] PHYSICAL HIT | "
-                                                    f"{armed_move.uci()} "
-                                                    f"{armed['bot_san']} "
-                                                    "| zero-think path | "
-                                                    "native queue was armed before human move"
-                                                )
-                                        except Exception:
-                                            opening_premove_armed = None
-
-
-                                # Prepared opening response for this exact confirmed
-                                # FEN. This creates only a frozen move decision; it
-                                # does not advance the virtual board.
-                                if pending_entry is None:
-                                    premove_entry = get_opening_premove(
-                                        opening_premove_cache,
-                                        board
-                                    )
-
-                                    if premove_entry is not None:
-                                        is_opening_premove = True
-                                        pending_entry = {
-                                            "uci": premove_entry["uci"],
-                                            "san": premove_entry["san"],
-                                            "result": None,
-                                            "best_info_move": None,
-                                            "selection_meta": {
-                                                "rank": int(
-                                                    premove_entry.get("rank", 1)
-                                                ) - 1,
-                                                "reason": (
-                                                    "OPENING PREMOVE | "
-                                                    f"depth={premove_entry.get('depth', 0)}/"
-                                                    f"{OPENING_PREMOVE_MAX_BOT_MOVES} "
-                                                    f"weight={premove_entry.get('weight', 0.0):.0f}"
-                                                ),
-                                                "source": "BOOK_PREMOVE",
-                                                "book_entries": int(
-                                                    premove_entry.get("entries", 0)
-                                                ),
-                                                "book_weight": float(
-                                                    premove_entry.get("weight", 0.0)
-                                                ),
-                                            },
-                                            "tempo_delay": 0.0,
-                                            "tempo_from_book": True,
-                                            "is_opening_premove": True,
-                                        }
-
-                                        print(
-                                            "[PREMOVE] HIT | "
-                                            f"{premove_entry['san']} "
-                                            "| think=0.000s "
-                                            f"| prepared_depth={premove_entry.get('depth', 0)}"
-                                        )
-
-                                # Tempo is frozen with the move. A physical retry
-                                # never causes a second full "human think".
-                                tempo_delay = None
-                                tempo_from_book = False
-
                                 # Freeze the Stockfish decision for this board position.
                                 # The same move is used for click, verification and retry.
                                 locked_bot_move = None
@@ -12078,23 +10977,6 @@ def main():
 
                                     engine_elapsed = 0.0
 
-                                    tempo_delay = pending_entry.get(
-                                        "tempo_delay"
-                                    )
-                                    tempo_from_book = bool(
-                                        pending_entry.get(
-                                            "tempo_from_book",
-                                            False
-                                        )
-                                    )
-
-                                    is_opening_premove = bool(
-                                        pending_entry.get(
-                                            "is_opening_premove",
-                                            is_opening_premove
-                                        )
-                                    )
-
                                     match_ui["preference"] = {
                                         "best": (
                                             best_info_move.uci()
@@ -12117,17 +10999,11 @@ def main():
                                         ),
                                     }
 
-                                    if is_opening_premove:
-                                        print(
-                                            "[PREMOVE] EXECUTING | "
-                                            f"{best_san} | zero-think path"
-                                        )
-                                    else:
-                                        print(
-                                            "[STOCKFISH] "
-                                            f"Retrying pending move: "
-                                            f"{best_san}"
-                                        )
+                                    print(
+                                        "[STOCKFISH] "
+                                        f"Retrying pending move: "
+                                        f"{best_san}"
+                                    )
 
                                 else:
                                     book_choice = gm_book.choose(board)
@@ -12257,66 +11133,6 @@ def main():
                                 if locked_bot_move is None:
                                     locked_bot_move = best_move
 
-                                # Prepare future opening responses while the current
-                                # physical board is still the confirmed pre-move board.
-                                # This can never mutate the real python-chess board.
-                                if (
-                                    OPENING_PREMOVE_ENABLED
-                                    and selection_meta.get("source")
-                                    in ("GM_BOOK", "BOOK_PREMOVE")
-                                    and len(board.move_stack)
-                                    <= OPENING_PREMOVE_MAX_TOTAL_PLIES
-                                ):
-                                    after_current = expected_board_after_move(
-                                        board,
-                                        best_move
-                                    )
-
-                                    bot_moves_done = sum(
-                                        1
-                                        for ply_index, _move in enumerate(
-                                            board.move_stack
-                                        )
-                                        if (
-                                            (
-                                                stockfish_color == chess.WHITE
-                                                and ply_index % 2 == 0
-                                            )
-                                            or
-                                            (
-                                                stockfish_color == chess.BLACK
-                                                and ply_index % 2 == 1
-                                            )
-                                        )
-                                    ) + 1
-
-                                    remaining_bot_moves = (
-                                        OPENING_PREMOVE_MAX_BOT_MOVES
-                                        - bot_moves_done
-                                    )
-
-                                    if remaining_bot_moves > 0:
-                                        future_stats = (
-                                            prepare_opening_premove_cache(
-                                                gm_book,
-                                                after_current,
-                                                stockfish_color,
-                                                opening_premove_cache,
-                                                max_bot_moves=remaining_bot_moves,
-                                                node_budget=OPENING_PREMOVE_FUTURE_NODE_BUDGET,
-                                                clear_existing=False
-                                            )
-                                        )
-
-                                        if future_stats.get("prepared", 0) > 0:
-                                            print(
-                                                "[PREMOVE] EXTENDED | "
-                                                f"positions={future_stats['positions']} "
-                                                f"| prepared={future_stats['prepared']} "
-                                                f"| nodes={future_stats['nodes']} "
-                                                f"| remaining_bot_moves={remaining_bot_moves}"
-                                            )
-
                                 pending_bot_moves[
                                     position_key
                                 ] = {
@@ -12325,14 +11141,6 @@ def main():
                                     "result": result,
                                     "best_info_move": best_info_move,
                                     "selection_meta": selection_meta,
-                                    "tempo_delay": None,
-                                    "tempo_from_book": (
-                                        True
-                                        if selection_meta.get("source")
-                                        in ("GM_BOOK", "BOOK_PREMOVE")
-                                        else False
-                                    ),
-                                    "is_opening_premove": is_opening_premove,
                                 }
 
                                 if pending_entry is not None:
@@ -12462,10 +11270,7 @@ def main():
 
                                 pending_recovery = None
 
-                                if (
-                                    pending_entry is not None
-                                    and not is_opening_premove
-                                ):
+                                if pending_entry is not None:
                                     pending_recovery = periodic_full_board_catchup_scan(
                                         sct,
                                         scrcpy_hwnd,
@@ -12515,41 +11320,6 @@ def main():
                                     scrcpy_hwnd
                                 )
 
-                                # A physical premove must have fired during the
-                                # human-move transition. The primary path waits up
-                                # to one second above; this defensive check prevents
-                                # a second click from being sent after a late native
-                                # execution.
-                                if (
-                                    not verified
-                                    and physical_premove_pending
-                                ):
-                                    (
-                                        physical_verified,
-                                        physical_after_frame,
-                                        physical_reason
-                                    ) = wait_for_physical_opening_premove(
-                                        sct,
-                                        scrcpy_hwnd,
-                                        board,
-                                        best_move,
-                                        cached_board_coords,
-                                        visual_black_perspective
-                                    )
-
-                                    if physical_verified:
-                                        verified = True
-                                        after_frame = physical_after_frame
-                                        reason = (
-                                            "[PREMOVE] native queue auto-executed | "
-                                            + physical_reason
-                                        )
-                                        print(
-                                            "[PREMOVE-QUEUE] AUTO-EXECUTED | "
-                                            f"bot={best_move.uci()} "
-                                            "| no click fallback"
-                                        )
-
                                 if before_frame is None and not verified:
                                     last_bot_position_key = (
                                         position_key
@@ -12570,7 +11340,6 @@ def main():
                                     not verified
                                     and best_move.promotion is not None
                                     and pending_entry is not None
-                                    and not is_opening_premove
                                 ):
                                     promotion_recovered = select_promotion_piece(
                                         sct,
@@ -12753,8 +11522,7 @@ def main():
                                             continue
 
                                 if (
-                                    not is_opening_premove
-                                    and stockfish_moves_since_buffer
+                                    stockfish_moves_since_buffer
                                     >= next_buffer_after
                                 ):
                                     buffer_delay = random.choice(
@@ -12784,40 +11552,6 @@ def main():
                                         "[VALIDATION] PRE-CLICK PASS | "
                                         "physical board matches internal board 64/64"
                                     )
-
-                                    # Only a freshly selected position gets a
-                                    # thinking delay. Pending retries reuse the same
-                                    # frozen tempo value and go straight to execution.
-                                    if pending_entry is None:
-                                        tempo_from_book = (
-                                            selection_meta.get("source") == "GM_BOOK"
-                                        )
-
-                                        if (
-                                            selection_meta.get("source")
-                                            == "BOOK_PREMOVE"
-                                        ):
-                                            tempo_delay = 0.0
-                                            tempo_from_book = True
-                                        else:
-                                            tempo_delay = human_like_move_delay(
-                                                board,
-                                                best_move,
-                                                from_book=tempo_from_book
-                                            )
-
-                                        pending_bot_moves[position_key][
-                                            "tempo_delay"
-                                        ] = tempo_delay
-                                        pending_bot_moves[position_key][
-                                            "tempo_from_book"
-                                        ] = tempo_from_book
-
-                                        if tempo_delay > 0.0:
-                                            time.sleep(tempo_delay)
-                                    else:
-                                        if tempo_delay is None:
-                                            tempo_delay = 0.0
 
                                     clicked = click_move(
                                         best_move,
@@ -13016,7 +11750,7 @@ def main():
 
                                     if analysis_state:
                                         predicted = analysis_state.get(
-                                            "next_human_move"
+                                            "best_move"
                                         )
 
                                         next_human_best_uci = (
@@ -13056,24 +11790,6 @@ def main():
                                         None
                                     )
 
-                                    if is_opening_premove:
-                                        opening_premove_cache.pop(
-                                            position_key,
-                                            None
-                                        )
-
-                                    if (
-                                        physical_premove_pending
-                                        and opening_premove_armed is not None
-                                        and opening_premove_armed.get("bot_uci")
-                                        == best_move.uci()
-                                    ):
-                                        print(
-                                            "[PREMOVE-QUEUE] CONSUMED | "
-                                            f"bot={best_move.uci()} | queue advanced"
-                                        )
-                                        opening_premove_armed = None
-
                                     last_bot_position_key = None
                                     next_main_turn_rescan = time.perf_counter() + TURN_RESCAN_INTERVAL
 
@@ -13092,17 +11808,6 @@ def main():
                                         f"[STOCKFISH] Confirmed: {best_san}",
                                         analysis_state
                                     )
-
-                                    # Keep the tempo result as the final move-related
-                                    # log line, after physical verification and state print.
-                                    if tempo_delay is not None:
-                                        print(
-                                            "[HUMAN TEMPO] COMPLETE | "
-                                            f"move={best_san} "
-                                            f"think={tempo_delay:.3f}s "
-                                            f"source="
-                                            f"{'BOOK-PREMOVE' if is_opening_premove else 'BOOK' if tempo_from_book else 'ENGINE'}"
-                                        )
 
                                 else:
                                     # Verification failure is recoverable. Keep the exact
@@ -13425,9 +12130,6 @@ def main():
 
                         if new_match_start_stable >= 2:
                             board = fresh_game["board"]
-                            opening_premove_cache.clear()
-                            opening_premove_armed = None
-                            opening_premove_board_id = None
                             visual_black_perspective = (
                                 fresh_game["perspective"]
                             )
