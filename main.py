@@ -10507,6 +10507,8 @@ def main():
 
                             if startup_new_game is not None:
                                 board = startup_new_game["board"]
+                                opening_premove_cache.clear()
+                                opening_premove_board_id = None
                                 visual_black_perspective = (
                                     startup_new_game["perspective"]
                                 )
@@ -10955,6 +10957,8 @@ def main():
 
                         if new_game is not None:
                             board = new_game["board"]
+                            opening_premove_cache.clear()
+                            opening_premove_board_id = None
 
                             visual_black_perspective = (
                                 new_game["perspective"]
@@ -12770,6 +12774,8 @@ def main():
 
                         if new_match_start_stable >= 2:
                             board = fresh_game["board"]
+                            opening_premove_cache.clear()
+                            opening_premove_board_id = None
                             visual_black_perspective = (
                                 fresh_game["perspective"]
                             )
