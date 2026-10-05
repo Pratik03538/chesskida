@@ -11699,9 +11699,6 @@ def main():
                                         f"bot={opening_premove_armed.get('bot_uci','-')} "
                                         f"| age={armed_age:.1f}s"
                                     )
-                                    release_physical_opening_drag(
-                                        opening_premove_armed
-                                    )
                                     if opening_premove_armed is not None:
                                         release_physical_opening_drag(
                                             opening_premove_armed
@@ -11726,9 +11723,6 @@ def main():
                                         f"{opening_premove_armed.get('predicted_human_uci','-')} "
                                         f"| actual_human={move.uci()}"
                                     )
-                                    release_physical_opening_drag(
-                                        opening_premove_armed
-                                    )
                                     if opening_premove_armed is not None:
                                         release_physical_opening_drag(
                                             opening_premove_armed
@@ -11742,65 +11736,7 @@ def main():
                             )
                             detect_human_move._last_detection_source = None
 
-                            if premove_combo_ok:
-                                final_human_ok = True
-                                final_human_frame = premove_combo_frame
-                                final_human_reason = (
-                                    "human move + prequeued Stockfish move "
-                                    "already physically confirmed | "
-                                    + premove_combo_reason
-                                )
-                                print(
-                                    "[PREMOVE-QUEUE] AUTO-EXECUTED | "
-                                    f"human={move.uci()} "
-                                    f"| bot={opening_premove_armed.get('bot_uci','-')} "
-                                    f"| combined board confirmed "
-                                    f"| fire_time={premove_combo_elapsed:.3f}s"
-                                )
-
-                                # The physical board is already ahead by the queued
-                                # Stockfish move. Commit BOTH confirmed moves now,
-                                # so the normal Stockfish click path is never entered.
-                                premove_bot_move = chess.Move.from_uci(
-                                    opening_premove_armed["bot_uci"]
-                                )
-
-                                board.push(move)
-                                board.push(premove_bot_move)
-
-                                opening_premove_cache.pop(
-                                    expected_human_board.fen(),
-                                    None
-                                )
-                                if opening_premove_armed is not None:
-                                    release_physical_opening_drag(
-                                        opening_premove_armed
-                                    )
-                                opening_premove_armed = None
-                                pending_bot_moves.clear()
-                                next_human_best_uci = None
-                                last_bot_position_key = None
-                                next_main_turn_rescan = (
-                                    time.perf_counter()
-                                    + TURN_RESCAN_INTERVAL
-                                )
-
-                                baseline_frame = (
-                                    premove_combo_frame
-                                    if premove_combo_frame is not None
-                                    else baseline_frame
-                                )
-
-                                print(
-                                    "[PREMOVE-QUEUE] COMMITTED | "
-                                    f"human={move.uci()} "
-                                    f"| bot={premove_bot_move.uci()} "
-                                    "| zero-delay next turn"
-                                )
-
-                                continue
-
-                            elif detection_source in (
+                            if detection_source in (
                                 "ULTRA_DELTA",
                                 "PERIODIC_FULL_RESCAN"
                             ):
@@ -12000,9 +11936,6 @@ def main():
                                         "[PREMOVE-DRAG] INVALID BOT MOVE | "
                                         f"bot={armed_bot_uci or '-'} "
                                         "| normal path resumes"
-                                    )
-                                    release_physical_opening_drag(
-                                        opening_premove_armed
                                     )
                                     if opening_premove_armed is not None:
                                         release_physical_opening_drag(
