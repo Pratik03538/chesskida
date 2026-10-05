@@ -7,6 +7,7 @@ import os
 import time
 import random
 import math
+import threading
 from collections import deque
 import chess
 import chess.engine
@@ -2645,13 +2646,45 @@ def left_click_screen(x, y, hold_seconds=0.020):
     return True
 
 
+def _physical_opening_drag_loop(armed):
+    """Keep the OS drag alive until explicitly released."""
+    stop_event = armed["drag_stop_event"]
+    target_x = int(armed["target_x"])
+    target_y = int(armed["target_y"])
+
+    while not stop_event.is_set():
+        try:
+            user32.SetCursorPos(
+                target_x,
+                target_y
+            )
+
+            # Also emit a real mouse-move event while the button stays down.
+            # This prevents the scrcpy/browser input bridge from treating a
+            # long held drag as stale.
+            if not _sendinput_mouse_flag(
+                MOUSEEVENTF_MOVE
+            ):
+                user32.mouse_event(
+                    MOUSEEVENTF_MOVE,
+                    0,
+                    0,
+                    0,
+                    0
+                )
+        except Exception:
+            break
+
+        stop_event.wait(0.001)
+
+
 def begin_physical_opening_drag(
     source_x,
     source_y,
     target_x,
     target_y
 ):
-    """Press/hold on source, drag to target, and keep holding."""
+    """Press source, physically drag to target, then keep holding forever."""
     try:
         user32.SetCursorPos(
             int(source_x),
@@ -2670,22 +2703,100 @@ def begin_physical_opening_drag(
                 0
             )
 
-        time.sleep(0.001)
+        # Perform an actual short drag instead of teleporting from source to
+        # target. This gives the UI a clear DOWN -> MOVE -> MOVE -> TARGET
+        # sequence before the long hold begins.
+        steps = 8
 
-        user32.SetCursorPos(
-            int(target_x),
-            int(target_y)
+        for step in range(
+            1,
+            steps + 1
+        ):
+            ratio = step / float(steps)
+
+            px = (
+                float(source_x)
+                + (
+                    float(target_x)
+                    - float(source_x)
+                ) * ratio
+            )
+
+            py = (
+                float(source_y)
+                + (
+                    float(target_y)
+                    - float(source_y)
+                ) * ratio
+            )
+
+            user32.SetCursorPos(
+                int(round(px)),
+                int(round(py))
+            )
+
+            if not _sendinput_mouse_flag(
+                MOUSEEVENTF_MOVE
+            ):
+                user32.mouse_event(
+                    MOUSEEVENTF_MOVE,
+                    0,
+                    0,
+                    0,
+                    0
+                )
+
+            time.sleep(0.002)
+
+        stop_event = threading.Event()
+
+        armed = {
+            "source_x": int(source_x),
+            "source_y": int(source_y),
+            "target_x": int(target_x),
+            "target_y": int(target_y),
+            "mouse_held": True,
+            "drag_stop_event": stop_event,
+        }
+
+        thread = threading.Thread(
+            target=_physical_opening_drag_loop,
+            args=(armed,),
+            name="physical-premove-drag",
+            daemon=True
         )
 
-        return True
+        armed["drag_thread"] = thread
+        thread.start()
+
+        return armed
+
     except Exception:
-        return False
+        try:
+            _sendinput_mouse_flag(
+                MOUSEEVENTF_LEFTUP
+            )
+        except Exception:
+            pass
+
+        try:
+            user32.mouse_event(
+                MOUSEEVENTF_LEFTUP,
+                0,
+                0,
+                0,
+                0
+            )
+        except Exception:
+            pass
+
+        return None
 
 
 def maintain_physical_opening_drag(
     armed
 ):
-    """Keep the held premove parked on the destination square."""
+    """Force the held premove back to target if another UI action moved it."""
     if not armed or not armed.get("mouse_held"):
         return False
 
@@ -2702,11 +2813,23 @@ def maintain_physical_opening_drag(
 def release_physical_opening_drag(
     armed
 ):
-    """Release the held premove on the destination square."""
+    """Stop continuous drag first, then release on the destination square."""
     if not armed or not armed.get("mouse_held"):
         return True
 
     try:
+        stop_event = armed.get("drag_stop_event")
+
+        if stop_event is not None:
+            stop_event.set()
+
+        thread = armed.get("drag_thread")
+
+        if thread is not None and thread.is_alive():
+            thread.join(
+                timeout=0.020
+            )
+
         user32.SetCursorPos(
             int(armed["target_x"]),
             int(armed["target_y"])
@@ -4082,12 +4205,14 @@ def arm_physical_opening_premove(
             f"| source=({sx},{sy}) target=({tx},{ty})"
         )
 
-        if not begin_physical_opening_drag(
+        drag_state = begin_physical_opening_drag(
             sx,
             sy,
             tx,
             ty
-        ):
+        )
+
+        if not drag_state:
             print(
                 "[PREMOVE-DRAG] ARM FAILED | "
                 f"mouse-down/drag dispatch failed | bot={bot_move.uci()}"
@@ -4099,7 +4224,7 @@ def arm_physical_opening_premove(
             f"bot={bot_move.uci()} "
             f"| source=({sx},{sy}) "
             f"| target=({tx},{ty}) "
-            "| HOLDING until human move is verified"
+            "| CONTINUOUS HOLD until opponent move is physically verified"
         )
 
         return {
@@ -4110,11 +4235,13 @@ def arm_physical_opening_premove(
             "bot_san": premove_entry["san"],
             "depth": int(premove_entry.get("depth", 0)),
             "created_at": time.perf_counter(),
-            "source_x": sx,
-            "source_y": sy,
-            "target_x": tx,
-            "target_y": ty,
-            "mouse_held": True,
+            "source_x": drag_state["source_x"],
+            "source_y": drag_state["source_y"],
+            "target_x": drag_state["target_x"],
+            "target_y": drag_state["target_y"],
+            "mouse_held": drag_state["mouse_held"],
+            "drag_stop_event": drag_state["drag_stop_event"],
+            "drag_thread": drag_state["drag_thread"],
         }
 
     except Exception as exc:
