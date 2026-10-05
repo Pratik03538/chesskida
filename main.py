@@ -8599,12 +8599,20 @@ def build_analysis(
         )
 
         pv = []
+        next_human_move = None
+        after_pv = after_info.get("pv", [])
+
+        if after_pv:
+            try:
+                candidate_next_human = after_pv[0]
+                if candidate_next_human in after_board.legal_moves:
+                    next_human_move = candidate_next_human
+            except Exception:
+                next_human_move = None
+
         temp = after_board.copy()
 
-        for pv_move in after_info.get(
-            "pv",
-            []
-        )[:6]:
+        for pv_move in after_pv[:6]:
             if pv_move not in temp.legal_moves:
                 break
 
@@ -8636,6 +8644,11 @@ def build_analysis(
                 best_move.uci()
                 if best_move is not None
                 else "-"
+            ),
+            "next_human_move": (
+                next_human_move.uci()
+                if next_human_move is not None
+                else None
             ),
             "depth": after_info.get(
                 "depth",
@@ -13056,7 +13069,7 @@ def main():
 
                                     if analysis_state:
                                         predicted = analysis_state.get(
-                                            "best_move"
+                                            "next_human_move"
                                         )
 
                                         next_human_best_uci = (
