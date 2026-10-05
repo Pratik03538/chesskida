@@ -7,7 +7,6 @@ import os
 import time
 import random
 import math
-import threading
 from collections import deque
 import chess
 import chess.engine
@@ -100,10 +99,11 @@ OPENING_PREMOVE_PHYSICAL_GAP = 0.001
 OPENING_PREMOVE_PHYSICAL_WAIT = 1.000
 OPENING_PREMOVE_PHYSICAL_MAX_AGE = 15.0
 
-# Persistent physical drag replaces the old source+destination click
-# arm verification. Selection/hover graphics are expected while the drag is held.
-OPENING_PREMOVE_ARM_CONFIRM_WAIT = 0.000
-OPENING_PREMOVE_ARM_CHANGE_MIN = 0.0000
+# Before calling a premove "armed", verify that the board UI actually reacted
+# to both source and destination clicks while the underlying piece placement
+# stayed unchanged.
+OPENING_PREMOVE_ARM_CONFIRM_WAIT = 0.080
+OPENING_PREMOVE_ARM_CHANGE_MIN = 0.0010
 
 # Tempo rhythm state. A mode lasts for several moves so the player has a
 # natural rhythm instead of independently re-rolling a delay every move.
@@ -2284,7 +2284,6 @@ ADAPTIVE_VERY_STRONG_THRESHOLD = 94.0
 
 MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
-MOUSEEVENTF_MOVE = 0x0001
 SW_RESTORE = 9
 
 if os.name == "nt":
@@ -2323,17 +2322,6 @@ if os.name == "nt":
             ctypes.c_int,
         ]
         user32.SendInput.restype = wintypes.UINT
-    except Exception:
-        pass
-
-    try:
-        user32.PostMessageW.argtypes = [
-            wintypes.HWND,
-            wintypes.UINT,
-            wintypes.WPARAM,
-            wintypes.LPARAM,
-        ]
-        user32.PostMessageW.restype = wintypes.BOOL
     except Exception:
         pass
 
@@ -2658,370 +2646,48 @@ def left_click_screen(x, y, hold_seconds=0.020):
     return True
 
 
-def _make_mouse_lparam(client_x, client_y):
-    return (
-        (int(client_y) & 0xFFFF) << 16
-    ) | (
-        int(client_x) & 0xFFFF
-    )
-
-
-def _post_scrcpy_mouse(
-    hwnd,
-    message,
-    screen_x,
-    screen_y,
-    wparam=0,
-    screen_origin=None
-):
-    """Send a mouse message directly to the scrcpy client."""
-    if (
-        hwnd is None
-        or not user32
-        or not user32.IsWindow(hwnd)
-    ):
-        return False
-
-    try:
-        if screen_origin is None:
-            screen_origin = get_scrcpy_screen_origin(hwnd)
-
-        if screen_origin is None:
-            return False
-
-        client_x = int(screen_x) - int(screen_origin[0])
-        client_y = int(screen_y) - int(screen_origin[1])
-
-        return bool(
-            user32.PostMessageW(
-                hwnd,
-                int(message),
-                int(wparam),
-                int(
-                    _make_mouse_lparam(
-                        client_x,
-                        client_y
-                    )
-                )
-            )
-        )
-    except Exception:
-        return False
-
-
-def _physical_opening_drag_loop(armed):
-    """Continuously send MOVE+LEFT held events to scrcpy until released."""
-    stop_event = armed["drag_stop_event"]
-    hwnd = armed.get("scrcpy_hwnd")
-    target_x = int(armed["target_x"])
-    target_y = int(armed["target_y"])
-    origin = armed.get("screen_origin")
-
-    while not stop_event.is_set():
-        try:
-            posted = _post_scrcpy_mouse(
-                hwnd,
-                WM_MOUSEMOVE,
-                target_x,
-                target_y,
-                wparam=MK_LBUTTON,
-                screen_origin=origin
-            )
-
-            if not posted:
-                # Fallback for environments where scrcpy does not accept
-                # posted window messages.
-                user32.SetCursorPos(
-                    target_x,
-                    target_y
-                )
-                _sendinput_mouse_flag(
-                    MOUSEEVENTF_MOVE
-                )
-        except Exception:
-            pass
-
-        stop_event.wait(0.001)
-
-
-def begin_physical_opening_drag(
-    source_x,
-    source_y,
-    target_x,
-    target_y,
-    scrcpy_hwnd,
-    screen_origin=None
-):
-    """Press source, drag to target, then HOLD the touch on target."""
-    try:
-        if screen_origin is None:
-            screen_origin = get_scrcpy_screen_origin(
-                scrcpy_hwnd
-            )
-
-        direct_down = _post_scrcpy_mouse(
-            scrcpy_hwnd,
-            WM_LBUTTONDOWN,
-            source_x,
-            source_y,
-            wparam=MK_LBUTTON,
-            screen_origin=screen_origin
-        )
-
-        if not direct_down:
-            user32.SetCursorPos(
-                int(source_x),
-                int(source_y)
-            )
-            time.sleep(0.001)
-
-            if not _sendinput_mouse_flag(
-                MOUSEEVENTF_LEFTDOWN
-            ):
-                user32.mouse_event(
-                    MOUSEEVENTF_LEFTDOWN,
-                    0,
-                    0,
-                    0,
-                    0
-                )
-
-        # Explicit physical drag: multiple MOVE messages while the button
-        # remains down, then hold on the destination.
-        steps = 16
-
-        for step in range(
-            1,
-            steps + 1
-        ):
-            ratio = step / float(steps)
-
-            px = (
-                float(source_x)
-                + (
-                    float(target_x)
-                    - float(source_x)
-                ) * ratio
-            )
-
-            py = (
-                float(source_y)
-                + (
-                    float(target_y)
-                    - float(source_y)
-                ) * ratio
-            )
-
-            posted = _post_scrcpy_mouse(
-                scrcpy_hwnd,
-                WM_MOUSEMOVE,
-                px,
-                py,
-                wparam=MK_LBUTTON,
-                screen_origin=screen_origin
-            )
-
-            if not posted:
-                user32.SetCursorPos(
-                    int(round(px)),
-                    int(round(py))
-                )
-                _sendinput_mouse_flag(
-                    MOUSEEVENTF_MOVE
-                )
-
-            time.sleep(0.001)
-
-        stop_event = threading.Event()
-
-        armed = {
-            "source_x": int(source_x),
-            "source_y": int(source_y),
-            "target_x": int(target_x),
-            "target_y": int(target_y),
-            "mouse_held": True,
-            "drag_stop_event": stop_event,
-            "scrcpy_hwnd": scrcpy_hwnd,
-            "screen_origin": screen_origin,
-            "direct_scrcpy": bool(direct_down),
-        }
-
-        thread = threading.Thread(
-            target=_physical_opening_drag_loop,
-            args=(armed,),
-            name="physical-premove-drag",
-            daemon=True
-        )
-
-        armed["drag_thread"] = thread
-        thread.start()
-
-        return armed
-
-    except Exception:
-        try:
-            _post_scrcpy_mouse(
-                scrcpy_hwnd,
-                WM_LBUTTONUP,
-                target_x,
-                target_y,
-                screen_origin=screen_origin
-            )
-        except Exception:
-            pass
-
-        try:
-            _sendinput_mouse_flag(
-                MOUSEEVENTF_LEFTUP
-            )
-        except Exception:
-            pass
-
-        return None
-
-
-def maintain_physical_opening_drag(
-    armed
-):
-    """Re-assert the held target position inside scrcpy."""
-    if not armed or not armed.get("mouse_held"):
-        return False
-
-    try:
-        _post_scrcpy_mouse(
-            armed.get("scrcpy_hwnd"),
-            WM_MOUSEMOVE,
-            int(armed["target_x"]),
-            int(armed["target_y"]),
-            wparam=MK_LBUTTON,
-            screen_origin=armed.get("screen_origin")
-        )
-        return True
-    except Exception:
-        return False
-
-
-def release_physical_opening_drag(
-    armed
-):
-    """Stop the continuous drag and release on the destination."""
-    if not armed or not armed.get("mouse_held"):
-        return True
-
-    try:
-        stop_event = armed.get("drag_stop_event")
-
-        if stop_event is not None:
-            stop_event.set()
-
-        thread = armed.get("drag_thread")
-
-        if thread is not None and thread.is_alive():
-            thread.join(
-                timeout=0.030
-            )
-
-        released = _post_scrcpy_mouse(
-            armed.get("scrcpy_hwnd"),
-            WM_LBUTTONUP,
-            int(armed["target_x"]),
-            int(armed["target_y"]),
-            screen_origin=armed.get("screen_origin")
-        )
-
-        if not released:
-            user32.SetCursorPos(
-                int(armed["target_x"]),
-                int(armed["target_y"])
-            )
-
-            released = _sendinput_mouse_flag(
-                MOUSEEVENTF_LEFTUP
-            )
-
-            if not released:
-                user32.mouse_event(
-                    MOUSEEVENTF_LEFTUP,
-                    0,
-                    0,
-                    0,
-                    0
-                )
-
-        armed["mouse_held"] = False
-        return True
-
-    except Exception:
-        try:
-            user32.mouse_event(
-                MOUSEEVENTF_LEFTUP,
-                0,
-                0,
-                0,
-                0
-            )
-        except Exception:
-            pass
-
-        armed["mouse_held"] = False
-        return False
-
-
 def capture_screen(sct, hwnd=None):
-    """Capture scrcpy safely; transient Windows BitBlt failures are recoverable."""
-    for attempt in range(2):
-        try:
-            if hwnd and user32 and user32.IsWindow(hwnd):
-                rect = wintypes.RECT()
+    if hwnd and user32 and user32.IsWindow(hwnd):
+        rect = wintypes.RECT()
 
-                user32.GetClientRect(
-                    hwnd,
-                    ctypes.byref(rect)
-                )
+        user32.GetClientRect(
+            hwnd,
+            ctypes.byref(rect)
+        )
 
-                point = wintypes.POINT(
-                    rect.left,
-                    rect.top
-                )
+        point = wintypes.POINT(
+            rect.left,
+            rect.top
+        )
 
-                user32.ClientToScreen(
-                    hwnd,
-                    ctypes.byref(point)
-                )
+        user32.ClientToScreen(
+            hwnd,
+            ctypes.byref(point)
+        )
 
-                width = rect.right - rect.left
-                height = rect.bottom - rect.top
+        width = rect.right - rect.left
+        height = rect.bottom - rect.top
 
-                if width <= 0 or height <= 0:
-                    return None
-
-                raw = np.asarray(
-                    sct.grab({
-                        "left": point.x,
-                        "top": point.y,
-                        "width": width,
-                        "height": height
-                    })
-                )
-
-            else:
-                raw = np.asarray(
-                    sct.grab(
-                        sct.monitors[1]
-                    )
-                )
-
-            return raw[:, :, :3].copy()
-
-        except Exception:
-            # Windows GDI/MSS can occasionally throw a transient BitBlt
-            # ScreenShotError. Do not terminate the chess process.
-            if attempt == 0:
-                time.sleep(0.001)
-                continue
+        if width <= 0 or height <= 0:
             return None
 
-    return None
+        raw = np.asarray(
+            sct.grab({
+                "left": point.x,
+                "top": point.y,
+                "width": width,
+                "height": height
+            })
+        )
+
+    else:
+        raw = np.asarray(
+            sct.grab(
+                sct.monitors[1]
+            )
+        )
+
+    return raw[:, :, :3].copy()
 
 
 def classify_square(
@@ -4235,11 +3901,12 @@ def arm_physical_opening_premove(
     black_perspective,
     scrcpy_hwnd
 ):
-    """Physically stage the next opening reply as a persistent drag.
+    """Physically queue the next opening reply before the human moves.
 
-    The predicted human move is only used to choose the bot reply. The real
-    board is not advanced. Source is pressed, dragged to target, and held
-    there until the actual human move has been physically verified.
+    The human move is only a prediction used to select the opening response.
+    The confirmed python-chess board is never changed here. The native game UI
+    receives the source+destination clicks so it can hold the move as a
+    premove until the opponent move is made.
     """
     if (
         not OPENING_PREMOVE_PHYSICAL_ENABLED
@@ -4312,34 +3979,186 @@ def arm_physical_opening_premove(
         )
 
         print(
-            "[PREMOVE-DRAG] STAGING | "
+            "[PREMOVE-QUEUE] STAGING | "
             f"predicted_human={predicted_human.uci()} "
             f"| bot={bot_move.uci()} {premove_entry['san']} "
             f"| source=({sx},{sy}) target=({tx},{ty})"
         )
 
-        drag_state = begin_physical_opening_drag(
-            sx,
-            sy,
-            tx,
-            ty,
-            scrcpy_hwnd,
-            screen_origin=screen_origin
+        before_arm_frame = capture_screen(
+            sct,
+            scrcpy_hwnd
         )
 
-        if not drag_state:
+        if before_arm_frame is None:
             print(
-                "[PREMOVE-DRAG] ARM FAILED | "
-                f"mouse-down/drag dispatch failed | bot={bot_move.uci()}"
+                "[PREMOVE-QUEUE] ARM FAILED | "
+                f"could not capture pre-queue board | bot={bot_move.uci()}"
+            )
+            return None
+
+        user32.SetCursorPos(0, 0)
+
+        # SOURCE CLICK: this must really select the intended piece.
+        if not left_click_screen(
+            sx,
+            sy,
+            hold_seconds=0.0
+        ):
+            print(
+                "[PREMOVE-QUEUE] SOURCE DISPATCH FAILED | "
+                f"{bot_move.uci()}"
+            )
+            return None
+
+        source_frame = capture_screen(
+            sct,
+            scrcpy_hwnd
+        )
+
+        if source_frame is None:
+            print(
+                "[PREMOVE-QUEUE] ARM FAILED | "
+                f"source confirmation frame missing | bot={bot_move.uci()}"
+            )
+            return None
+
+        source_changes = fast_square_motion_scores(
+            before_arm_frame,
+            source_frame,
+            board_coords,
+            black_perspective
+        )
+
+        source_change = (
+            source_changes.get(
+                bot_move.from_square,
+                0.0
+            )
+            if source_changes is not None
+            else 0.0
+        )
+
+        source_board_ok, _ = full_board_state_confirmed(
+            source_frame,
+            board,
+            board_coords,
+            black_perspective
+        )
+
+        if (
+            not source_board_ok
+            or source_change < OPENING_PREMOVE_ARM_CHANGE_MIN
+        ):
+            print(
+                "[PREMOVE-QUEUE] ARM FAILED | "
+                "source click did not produce a valid selection state | "
+                f"bot={bot_move.uci()} "
+                f"| source_change={source_change:.4f} "
+                f"| board_unchanged={source_board_ok}"
+            )
+            return None
+
+        time.sleep(
+            OPENING_PREMOVE_PHYSICAL_GAP
+        )
+
+        # DESTINATION CLICK: this completes the native premove request.
+        if not left_click_screen(
+            tx,
+            ty,
+            hold_seconds=0.0
+        ):
+            print(
+                "[PREMOVE-QUEUE] DESTINATION DISPATCH FAILED | "
+                f"{bot_move.uci()}"
+            )
+            return None
+
+        user32.SetCursorPos(0, 0)
+
+        arm_deadline = (
+            time.perf_counter()
+            + OPENING_PREMOVE_ARM_CONFIRM_WAIT
+        )
+
+        armed_frame = None
+        target_change = 0.0
+        final_source_change = source_change
+
+        while time.perf_counter() < arm_deadline:
+            check_frame = capture_screen(
+                sct,
+                scrcpy_hwnd
+            )
+
+            if check_frame is None:
+                time.sleep(BOT_RECOVERY_POLL)
+                continue
+
+            changes = fast_square_motion_scores(
+                before_arm_frame,
+                check_frame,
+                board_coords,
+                black_perspective
+            )
+
+            if changes is None:
+                time.sleep(BOT_RECOVERY_POLL)
+                continue
+
+            final_source_change = max(
+                final_source_change,
+                changes.get(
+                    bot_move.from_square,
+                    0.0
+                )
+            )
+
+            target_change = max(
+                target_change,
+                changes.get(
+                    bot_move.to_square,
+                    0.0
+                )
+            )
+
+            # The piece placement must still be the current board. Highlights
+            # / selection graphics may change, but the actual pieces cannot.
+            unchanged_ok, _ = full_board_state_confirmed(
+                check_frame,
+                board,
+                board_coords,
+                black_perspective
+            )
+
+            if (
+                unchanged_ok
+                and final_source_change
+                >= OPENING_PREMOVE_ARM_CHANGE_MIN
+                and target_change
+                >= OPENING_PREMOVE_ARM_CHANGE_MIN
+            ):
+                armed_frame = check_frame
+                break
+
+            time.sleep(BOT_RECOVERY_POLL)
+
+        if armed_frame is None:
+            print(
+                "[PREMOVE-QUEUE] ARM FAILED | "
+                "source+destination native queue state not confirmed | "
+                f"bot={bot_move.uci()} "
+                f"| source={final_source_change:.4f} "
+                f"| target={target_change:.4f}"
             )
             return None
 
         print(
-            "[PREMOVE-DRAG] ARMED | "
+            "[PREMOVE-QUEUE] ARMED-CONFIRMED | "
             f"bot={bot_move.uci()} "
-            f"| source=({sx},{sy}) "
-            f"| target=({tx},{ty}) "
-            "| CONTINUOUS HOLD until opponent move is physically verified"
+            f"| source={final_source_change:.4f} "
+            f"| target={target_change:.4f}"
         )
 
         return {
@@ -4350,30 +4169,13 @@ def arm_physical_opening_premove(
             "bot_san": premove_entry["san"],
             "depth": int(premove_entry.get("depth", 0)),
             "created_at": time.perf_counter(),
-            "source_x": drag_state["source_x"],
-            "source_y": drag_state["source_y"],
-            "target_x": drag_state["target_x"],
-            "target_y": drag_state["target_y"],
-            "mouse_held": drag_state["mouse_held"],
-            "drag_stop_event": drag_state["drag_stop_event"],
-            "drag_thread": drag_state["drag_thread"],
         }
 
     except Exception as exc:
         print(
-            "[PREMOVE-DRAG] ERROR | "
+            "[PREMOVE-QUEUE] ERROR | "
             f"{exc}"
         )
-        try:
-            user32.mouse_event(
-                MOUSEEVENTF_LEFTUP,
-                0,
-                0,
-                0,
-                0
-            )
-        except Exception:
-            pass
         return None
 
 
@@ -11088,10 +10890,6 @@ def main():
                             if startup_new_game is not None:
                                 board = startup_new_game["board"]
                                 opening_premove_cache.clear()
-                                if opening_premove_armed is not None:
-                                    release_physical_opening_drag(
-                                        opening_premove_armed
-                                    )
                                 opening_premove_armed = None
                                 opening_premove_board_id = None
                                 visual_black_perspective = (
@@ -11543,10 +11341,6 @@ def main():
                         if new_game is not None:
                             board = new_game["board"]
                             opening_premove_cache.clear()
-                            if opening_premove_armed is not None:
-                                release_physical_opening_drag(
-                                    opening_premove_armed
-                                )
                             opening_premove_armed = None
                             opening_premove_board_id = None
 
@@ -11747,10 +11541,6 @@ def main():
                         and current_board_id != opening_premove_board_id
                     ):
                         opening_premove_cache.clear()
-                        if opening_premove_armed is not None:
-                            release_physical_opening_drag(
-                                opening_premove_armed
-                            )
                         opening_premove_armed = None
 
                         premove_stats = (
@@ -11814,13 +11604,6 @@ def main():
                                     f"{staged_premove['bot_san']} "
                                     "| waiting for real human move"
                                 )
-
-                        # Keep the premove drag physically held on the target
-                        # while human move detection is running.
-                        if opening_premove_armed is not None:
-                            maintain_physical_opening_drag(
-                                opening_premove_armed
-                            )
 
                         progress(
                             "WAIT",
@@ -11914,17 +11697,15 @@ def main():
                                 move
                             )
 
-                            # Keep a physical premove as a held source->target
-                            # drag while the human is deciding. Do not release it
-                            # merely because a visual move was detected; the normal
-                            # human verification gate must pass first.
+                            # The premove is already physically queued BEFORE
+                            # the opponent moves. We only remember whether the
+                            # detected human move matches that prediction here.
+                            # The actual human move must still pass the SAME
+                            # physical verification path as before.
                             premove_prediction_match = False
+                            armed_bot_move = None
 
                             if opening_premove_armed is not None:
-                                maintain_physical_opening_drag(
-                                    opening_premove_armed
-                                )
-
                                 armed_age = (
                                     time.perf_counter()
                                     - float(
@@ -11935,40 +11716,53 @@ def main():
                                     )
                                 )
 
-                                if armed_age > OPENING_PREMOVE_PHYSICAL_MAX_AGE:
+                                if (
+                                    armed_age
+                                    > OPENING_PREMOVE_PHYSICAL_MAX_AGE
+                                ):
                                     print(
-                                        "[PREMOVE-DRAG] EXPIRED | "
-                                        f"bot={opening_premove_armed.get('bot_uci','-')} "
-                                        f"| age={armed_age:.1f}s"
+                                        "[PREMOVE-QUEUE] EXPIRED | "
+                                        f"bot={opening_premove_armed.get('bot_uci','-')}"
                                     )
-                                    if opening_premove_armed is not None:
-                                        release_physical_opening_drag(
-                                            opening_premove_armed
-                                        )
                                     opening_premove_armed = None
 
-                                elif move.uci() == opening_premove_armed.get(
-                                    "predicted_human_uci"
-                                ):
-                                    premove_prediction_match = True
-                                    print(
-                                        "[PREMOVE-DRAG] HUMAN MATCHED | "
-                                        f"human={move.uci()} "
-                                        f"| bot={opening_premove_armed.get('bot_uci','-')} "
-                                        "| verifying human move before release"
+                                elif (
+                                    move.uci()
+                                    == opening_premove_armed.get(
+                                        "predicted_human_uci"
                                     )
+                                ):
+                                    try:
+                                        candidate_bot_move = (
+                                            chess.Move.from_uci(
+                                                opening_premove_armed["bot_uci"]
+                                            )
+                                        )
+
+                                        if (
+                                            candidate_bot_move
+                                            in expected_human_board.legal_moves
+                                        ):
+                                            premove_prediction_match = True
+                                            armed_bot_move = candidate_bot_move
+
+                                            print(
+                                                "[PREMOVE-QUEUE] HUMAN MATCHED | "
+                                                f"human={move.uci()} "
+                                                f"| queued_bot={candidate_bot_move.uci()} "
+                                                "| verifying human first"
+                                            )
+                                    except Exception:
+                                        premove_prediction_match = False
+                                        armed_bot_move = None
 
                                 else:
                                     print(
-                                        "[PREMOVE-DRAG] CANCELLED | "
+                                        "[PREMOVE-QUEUE] CANCELLED | "
                                         f"predicted_human="
                                         f"{opening_premove_armed.get('predicted_human_uci','-')} "
                                         f"| actual_human={move.uci()}"
                                     )
-                                    if opening_premove_armed is not None:
-                                        release_physical_opening_drag(
-                                            opening_premove_armed
-                                        )
                                     opening_premove_armed = None
 
                             detection_source = getattr(
@@ -11978,7 +11772,61 @@ def main():
                             )
                             detect_human_move._last_detection_source = None
 
-                            if detection_source in (
+                            if premove_combo_ok:
+                                final_human_ok = True
+                                final_human_frame = premove_combo_frame
+                                final_human_reason = (
+                                    "human move + prequeued Stockfish move "
+                                    "already physically confirmed | "
+                                    + premove_combo_reason
+                                )
+                                print(
+                                    "[PREMOVE-QUEUE] AUTO-EXECUTED | "
+                                    f"human={move.uci()} "
+                                    f"| bot={opening_premove_armed.get('bot_uci','-')} "
+                                    f"| combined board confirmed "
+                                    f"| fire_time={premove_combo_elapsed:.3f}s"
+                                )
+
+                                # The physical board is already ahead by the queued
+                                # Stockfish move. Commit BOTH confirmed moves now,
+                                # so the normal Stockfish click path is never entered.
+                                premove_bot_move = chess.Move.from_uci(
+                                    opening_premove_armed["bot_uci"]
+                                )
+
+                                board.push(move)
+                                board.push(premove_bot_move)
+
+                                opening_premove_cache.pop(
+                                    expected_human_board.fen(),
+                                    None
+                                )
+                                opening_premove_armed = None
+                                pending_bot_moves.clear()
+                                next_human_best_uci = None
+                                last_bot_position_key = None
+                                next_main_turn_rescan = (
+                                    time.perf_counter()
+                                    + TURN_RESCAN_INTERVAL
+                                )
+
+                                baseline_frame = (
+                                    premove_combo_frame
+                                    if premove_combo_frame is not None
+                                    else baseline_frame
+                                )
+
+                                print(
+                                    "[PREMOVE-QUEUE] COMMITTED | "
+                                    f"human={move.uci()} "
+                                    f"| bot={premove_bot_move.uci()} "
+                                    "| zero-delay next turn"
+                                )
+
+                                continue
+
+                            elif detection_source in (
                                 "ULTRA_DELTA",
                                 "PERIODIC_FULL_RESCAN"
                             ):
@@ -12031,161 +11879,116 @@ def main():
                                 else move_frame
                             )
 
-                            # Release the physical premove ONLY after the real
-                            # human move has passed the existing verification gate.
-                            # The mouse-up is what fires the queued bot move.
+                            # HUMAN is verified exactly as before first.
+                            # Only after that do we verify the already-queued bot
+                            # premove. No new bot click is performed here.
                             if (
                                 premove_prediction_match
+                                and armed_bot_move is not None
                                 and opening_premove_armed is not None
                             ):
-                                armed_premove = opening_premove_armed
-                                armed_bot_uci = armed_premove.get(
-                                    "bot_uci"
+                                premove_wait_start = time.perf_counter()
+
+                                (
+                                    premove_combo_ok,
+                                    premove_combo_frame,
+                                    premove_combo_reason
+                                ) = wait_for_physical_opening_premove(
+                                    sct,
+                                    scrcpy_hwnd,
+                                    expected_human_board,
+                                    armed_bot_move,
+                                    cached_board_coords,
+                                    visual_black_perspective,
+                                    timeout=OPENING_PREMOVE_PHYSICAL_WAIT
                                 )
 
-                                try:
-                                    armed_bot_move = chess.Move.from_uci(
-                                        armed_bot_uci
-                                    )
-                                except Exception:
-                                    armed_bot_move = None
+                                premove_combo_elapsed = (
+                                    time.perf_counter()
+                                    - premove_wait_start
+                                )
 
-                                if (
-                                    armed_bot_move is not None
-                                    and armed_bot_move
-                                    in expected_human_board.legal_moves
-                                ):
-                                    release_physical_opening_drag(
-                                        armed_premove
+                                if premove_combo_ok:
+                                    print(
+                                        "[PREMOVE-QUEUE] AUTO-EXECUTED | "
+                                        f"human={move.uci()} "
+                                        f"| bot={armed_bot_move.uci()} "
+                                        f"| human_verify=PASS "
+                                        f"| bot_verify={premove_combo_elapsed:.3f}s"
                                     )
 
-                                    premove_fire_start = (
-                                        time.perf_counter()
+                                    before_premove_bot_board = (
+                                        expected_human_board.copy(
+                                            stack=False
+                                        )
                                     )
 
-                                    (
-                                        premove_combo_ok,
-                                        premove_combo_frame,
-                                        premove_combo_reason
-                                    ) = wait_for_physical_opening_premove(
-                                        sct,
-                                        scrcpy_hwnd,
-                                        expected_human_board,
+                                    board.push(
+                                        move
+                                    )
+                                    board.push(
+                                        armed_bot_move
+                                    )
+
+                                    analysis_state = build_analysis(
+                                        engine,
+                                        before_premove_bot_board,
+                                        board,
                                         armed_bot_move,
-                                        cached_board_coords,
-                                        visual_black_perspective,
-                                        timeout=OPENING_PREMOVE_PHYSICAL_WAIT
+                                        best_info=None
                                     )
 
-                                    premove_combo_elapsed = (
+                                    if analysis_state:
+                                        predicted = analysis_state.get(
+                                            "next_human_move"
+                                        )
+                                        next_human_best_uci = (
+                                            predicted
+                                            if predicted
+                                            and predicted != "-"
+                                            else None
+                                        )
+                                    else:
+                                        next_human_best_uci = None
+
+                                    opening_premove_cache.pop(
+                                        expected_human_board.fen(),
+                                        None
+                                    )
+                                    opening_premove_armed = None
+                                    pending_bot_moves.clear()
+                                    last_bot_position_key = None
+                                    next_main_turn_rescan = (
                                         time.perf_counter()
-                                        - premove_fire_start
+                                        + TURN_RESCAN_INTERVAL
                                     )
 
-                                    if premove_combo_ok:
-                                        print(
-                                            "[PREMOVE-DRAG] FIRED | "
-                                            f"human={move.uci()} "
-                                            f"| bot={armed_bot_move.uci()} "
-                                            f"| verify={premove_combo_elapsed:.3f}s"
-                                        )
-
-                                        before_premove_bot_board = (
-                                            expected_human_board.copy(
-                                                stack=False
-                                            )
-                                        )
-
-                                        board.push(
-                                            move
-                                        )
-                                        board.push(
-                                            armed_bot_move
-                                        )
-
-                                        # Refresh the same post-bot analysis pipeline
-                                        # immediately. This supplies the next predicted
-                                        # human move so the next physical drag can arm
-                                        # on the very next loop iteration.
-                                        analysis_state = build_analysis(
-                                            engine,
-                                            before_premove_bot_board,
-                                            board,
-                                            armed_bot_move,
-                                            best_info=None
-                                        )
-
-                                        if analysis_state:
-                                            predicted = analysis_state.get(
-                                                "next_human_move"
-                                            )
-                                            next_human_best_uci = (
-                                                predicted
-                                                if predicted
-                                                and predicted != "-"
-                                                else None
-                                            )
-                                        else:
-                                            next_human_best_uci = None
-
-                                        opening_premove_cache.pop(
-                                            expected_human_board.fen(),
-                                            None
-                                        )
-                                        if opening_premove_armed is not None:
-                                            release_physical_opening_drag(
-                                                opening_premove_armed
-                                            )
-                                        opening_premove_armed = None
-                                        pending_bot_moves.clear()
-                                        last_bot_position_key = None
-                                        next_main_turn_rescan = (
-                                            time.perf_counter()
-                                            + TURN_RESCAN_INTERVAL
-                                        )
-
-                                        baseline_frame = (
-                                            premove_combo_frame
-                                            if premove_combo_frame is not None
-                                            else move_frame
-                                        )
-
-                                        print(
-                                            "[PREMOVE-DRAG] COMMITTED | "
-                                            f"human={move.uci()} "
-                                            f"| bot={armed_bot_move.uci()} "
-                                            f"| next_human={next_human_best_uci or '-'} "
-                                            "| next premove can arm immediately"
-                                        )
-
-                                        continue
+                                    baseline_frame = (
+                                        premove_combo_frame
+                                        if premove_combo_frame is not None
+                                        else move_frame
+                                    )
 
                                     print(
-                                        "[PREMOVE-DRAG] FIRE TIMEOUT | "
-                                        f"bot={armed_bot_move.uci()} "
-                                        f"| waited={premove_combo_elapsed:.3f}s "
-                                        "| >1.000s => premove FAILED; normal path resumes"
+                                        "[PREMOVE-QUEUE] COMMITTED | "
+                                        f"human={move.uci()} "
+                                        f"| bot={armed_bot_move.uci()} "
+                                        "| next premove can arm immediately"
                                     )
 
-                                    if opening_premove_armed is not None:
-                                        release_physical_opening_drag(
-                                            opening_premove_armed
-                                        )
-                                    opening_premove_armed = None
+                                    continue
 
-                                else:
-                                    print(
-                                        "[PREMOVE-DRAG] INVALID BOT MOVE | "
-                                        f"bot={armed_bot_uci or '-'} "
-                                        "| normal path resumes"
-                                    )
-                                    if opening_premove_armed is not None:
-                                        release_physical_opening_drag(
-                                            opening_premove_armed
-                                        )
-                                    opening_premove_armed = None
+                                print(
+                                    "[PREMOVE-QUEUE] TIMEOUT | "
+                                    f"bot={armed_bot_move.uci()} "
+                                    f"| waited={premove_combo_elapsed:.3f}s "
+                                    "| >1.000s => premove FAILED; normal bot path resumes"
+                                )
+
+                                opening_premove_armed = None
 
                             next_human_best_uci = None
+
 
                             board.push(
                                 move
@@ -12278,10 +12081,6 @@ def main():
                                                 f"bot={armed.get('bot_uci','-')}"
                                             )
 
-                                        if opening_premove_armed is not None:
-                                            release_physical_opening_drag(
-                                                opening_premove_armed
-                                            )
                                         opening_premove_armed = None
 
                                     else:
@@ -12327,10 +12126,6 @@ def main():
                                                     "native queue was armed before human move"
                                                 )
                                         except Exception:
-                                            if opening_premove_armed is not None:
-                                                release_physical_opening_drag(
-                                                    opening_premove_armed
-                                                )
                                             opening_premove_armed = None
 
 
@@ -13413,10 +13208,6 @@ def main():
                                             "[PREMOVE-QUEUE] CONSUMED | "
                                             f"bot={best_move.uci()} | queue advanced"
                                         )
-                                        if opening_premove_armed is not None:
-                                            release_physical_opening_drag(
-                                                opening_premove_armed
-                                            )
                                         opening_premove_armed = None
 
                                     last_bot_position_key = None
@@ -13771,10 +13562,6 @@ def main():
                         if new_match_start_stable >= 2:
                             board = fresh_game["board"]
                             opening_premove_cache.clear()
-                            if opening_premove_armed is not None:
-                                release_physical_opening_drag(
-                                    opening_premove_armed
-                                )
                             opening_premove_armed = None
                             opening_premove_board_id = None
                             visual_black_perspective = (
@@ -13930,27 +13717,6 @@ def main():
                 )
 
         finally:
-            # Never leave a physical premove mouse button held if the program
-            # exits, the screen capture fails repeatedly, or another exception
-            # reaches the main loop.
-            try:
-                if opening_premove_armed is not None:
-                    release_physical_opening_drag(
-                        opening_premove_armed
-                    )
-                    opening_premove_armed = None
-            except Exception:
-                try:
-                    user32.mouse_event(
-                        MOUSEEVENTF_LEFTUP,
-                        0,
-                        0,
-                        0,
-                        0
-                    )
-                except Exception:
-                    pass
-
             cv2.destroyAllWindows()
 
             try:
