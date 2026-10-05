@@ -132,7 +132,22 @@ EMPTY_DEST_MATCH_THRESHOLD = 0.10
 CLICK_CIRCLE_AREA = 0.08
 CLICK_CIRCLE_RADIUS_FRACTION = math.sqrt(CLICK_CIRCLE_AREA / math.pi)
 
-# After a random 5-8 Stockfish moves, add one random human-like pause.
+# Natural bot move timing.
+# Every move gets a slightly different delay.  Occasional tactical/strategic
+# moments get a longer pause, while retries stay on the existing fast path.
+BOT_NATURAL_DELAY_MIN = 0.12
+BOT_NATURAL_DELAY_MAX = 0.58
+BOT_TACTICAL_DELAY_MIN = 0.52
+BOT_TACTICAL_DELAY_MAX = 0.88
+BOT_STRATEGIC_DELAY_MIN = 0.62
+BOT_STRATEGIC_DELAY_MAX = 1.05
+BOT_MATE_DELAY_MIN = 0.78
+BOT_MATE_DELAY_MAX = 1.18
+BOT_STRATEGIC_CHANCE = 0.18
+BOT_LONG_THINK_CHANCE = 0.08
+BOT_DELAY_REPEAT_GAP = 0.045
+
+# Retained as counters for match-state reset/log compatibility.
 RANDOM_BUFFER_MOVE_MIN = 5
 RANDOM_BUFFER_MOVE_MAX = 8
 RANDOM_BUFFER_OPTIONS = (0.0,)
@@ -2311,6 +2326,7 @@ def clear_runtime_caches():
 PROGRESS_INTERVAL = 0.35
 _progress_times = {}
 _progress_last_text = {}
+_last_bot_natural_delay = None
 
 
 def progress(stage, detail="", key=None, interval=PROGRESS_INTERVAL, force=False):
@@ -7744,6 +7760,103 @@ def classify_move_quality(
     return "BLUNDER"
 
 
+def natural_bot_move_delay(
+    board,
+    move,
+    engine_result=None,
+    selection_meta=None,
+    moves_since_buffer=0
+):
+    """Return a varied pre-click delay for the next bot move.
+
+    Move choice, verification, and retries are untouched.  This function only
+    controls the first-click waiting time and deliberately avoids a fixed
+    per-move sleep.
+    """
+    global _last_bot_natural_delay
+
+    selection_meta = selection_meta or {}
+
+    # Prefer a small, varied "thinking" delay on ordinary moves.
+    delay = random.triangular(
+        BOT_NATURAL_DELAY_MIN,
+        BOT_NATURAL_DELAY_MAX,
+        0.26
+    )
+
+    try:
+        gives_check = board.gives_check(move)
+    except Exception:
+        gives_check = False
+
+    try:
+        after = board.copy(stack=False)
+        after.push(move)
+        is_mate = after.is_checkmate()
+    except Exception:
+        after = None
+        is_mate = False
+
+    # Strong tactical moments: check, capture, promotion, castling.
+    tactical = (
+        gives_check
+        or board.is_capture(move)
+        or move.promotion is not None
+        or board.is_castling(move)
+    )
+
+    # "Strategic" means the selector chose the engine/book top move, but only
+    # occasionally take the longer-thought branch so the timing distribution
+    # stays varied rather than adding a pause to every #1 move.
+    rank = selection_meta.get("rank")
+    top_choice = rank == 0
+    strategic = top_choice and (
+        random.random() < BOT_STRATEGIC_CHANCE
+    )
+
+    if is_mate:
+        delay = random.uniform(
+            BOT_MATE_DELAY_MIN,
+            BOT_MATE_DELAY_MAX
+        )
+    elif tactical and random.random() < 0.45:
+        delay = random.uniform(
+            BOT_TACTICAL_DELAY_MIN,
+            BOT_TACTICAL_DELAY_MAX
+        )
+    elif strategic:
+        delay = random.uniform(
+            BOT_STRATEGIC_DELAY_MIN,
+            BOT_STRATEGIC_DELAY_MAX
+        )
+    elif (
+        moves_since_buffer >= random.randint(
+            RANDOM_BUFFER_MOVE_MIN,
+            RANDOM_BUFFER_MOVE_MAX
+        )
+        and random.random() < BOT_LONG_THINK_CHANCE
+    ):
+        delay = random.uniform(
+            BOT_STRATEGIC_DELAY_MIN,
+            BOT_STRATEGIC_DELAY_MAX
+        )
+
+    # Avoid producing the exact/similarly-close same delay twice in a row.
+    if _last_bot_natural_delay is not None:
+        if abs(delay - _last_bot_natural_delay) < BOT_DELAY_REPEAT_GAP:
+            delta = random.uniform(
+                BOT_DELAY_REPEAT_GAP,
+                BOT_DELAY_REPEAT_GAP * 2.5
+            )
+            if delay + delta <= BOT_MATE_DELAY_MAX:
+                delay += delta
+            elif delay - delta >= BOT_NATURAL_DELAY_MIN:
+                delay -= delta
+
+    _last_bot_natural_delay = delay
+    return max(0.0, float(delay))
+
+
 def build_analysis(
     engine,
     before_board,
@@ -11521,37 +11634,29 @@ def main():
                                             time.sleep(BOT_RECOVERY_POLL)
                                             continue
 
-                                if (
-                                    stockfish_moves_since_buffer
-                                    >= next_buffer_after
-                                ):
-                                    buffer_delay = random.choice(
-                                        RANDOM_BUFFER_OPTIONS
-                                    )
-
-                                    print(
-                                        "[BOT BUFFER] "
-                                        f"after "
-                                        f"{stockfish_moves_since_buffer} "
-                                        f"Stockfish moves -> "
-                                        f"{buffer_delay:.1f}s"
-                                    )
-
-                                    if buffer_delay > 0.0:
-                                        time.sleep(buffer_delay)
-
-                                    stockfish_moves_since_buffer = 0
-
-                                    next_buffer_after = random.randint(
-                                        RANDOM_BUFFER_MOVE_MIN,
-                                        RANDOM_BUFFER_MOVE_MAX
-                                    )
-
                                 if not verified:
                                     print(
                                         "[VALIDATION] PRE-CLICK PASS | "
                                         "physical board matches internal board 64/64"
                                     )
+
+                                    # Apply natural timing ONLY to the first
+                                    # click attempt. Pending retries stay fast.
+                                    if pending_entry is None:
+                                        natural_delay = natural_bot_move_delay(
+                                            board,
+                                            best_move,
+                                            engine_result=result,
+                                            selection_meta=selection_meta,
+                                            moves_since_buffer=stockfish_moves_since_buffer
+                                        )
+                                        print(
+                                            "[BOT TIMING] "
+                                            f"{natural_delay:.3f}s | "
+                                            f"{best_move.uci()} "
+                                            f"{best_san}"
+                                        )
+                                        time.sleep(natural_delay)
 
                                     clicked = click_move(
                                         best_move,
