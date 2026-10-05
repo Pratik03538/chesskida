@@ -3765,9 +3765,8 @@ def prepare_opening_premove_cache(
 
             next_depth = bot_depth + 1
 
-            cache.setdefault(
-                fen,
-                {
+            if fen not in cache:
+                cache[fen] = {
                     "uci": move.uci(),
                     "san": current_board.san(move),
                     "weight": candidate["weight"],
@@ -3776,9 +3775,7 @@ def prepare_opening_premove_cache(
                     "depth": next_depth,
                     "created_at": time.perf_counter(),
                 }
-            )
-
-            prepared += 1
+                prepared += 1
 
             if next_depth >= max_bot_moves:
                 continue
