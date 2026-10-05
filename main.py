@@ -11101,6 +11101,11 @@ def main():
                                     )
                                 )
 
+                                # Tempo is frozen with the move. A physical retry
+                                # never causes a second full "human think".
+                                tempo_delay = None
+                                tempo_from_book = False
+
                                 # Freeze the Stockfish decision for this board position.
                                 # The same move is used for click, verification and retry.
                                 locked_bot_move = None
@@ -11134,6 +11139,16 @@ def main():
                                     )
 
                                     engine_elapsed = 0.0
+
+                                    tempo_delay = pending_entry.get(
+                                        "tempo_delay"
+                                    )
+                                    tempo_from_book = bool(
+                                        pending_entry.get(
+                                            "tempo_from_book",
+                                            False
+                                        )
+                                    )
 
                                     match_ui["preference"] = {
                                         "best": (
@@ -11299,6 +11314,10 @@ def main():
                                     "result": result,
                                     "best_info_move": best_info_move,
                                     "selection_meta": selection_meta,
+                                    "tempo_delay": None,
+                                    "tempo_from_book": (
+                                        selection_meta.get("source") == "GM_BOOK"
+                                    ),
                                 }
 
                                 if pending_entry is not None:
@@ -11711,18 +11730,32 @@ def main():
                                         "physical board matches internal board 64/64"
                                     )
 
-                                    tempo_from_book = (
-                                        selection_meta.get("source") == "GM_BOOK"
-                                    )
+                                    # Only a freshly selected position gets a
+                                    # thinking delay. Pending retries reuse the same
+                                    # frozen tempo value and go straight to execution.
+                                    if pending_entry is None:
+                                        tempo_from_book = (
+                                            selection_meta.get("source") == "GM_BOOK"
+                                        )
 
-                                    tempo_delay = human_like_move_delay(
-                                        board,
-                                        best_move,
-                                        from_book=tempo_from_book
-                                    )
+                                        tempo_delay = human_like_move_delay(
+                                            board,
+                                            best_move,
+                                            from_book=tempo_from_book
+                                        )
 
-                                    if tempo_delay > 0.0:
-                                        time.sleep(tempo_delay)
+                                        pending_bot_moves[position_key][
+                                            "tempo_delay"
+                                        ] = tempo_delay
+                                        pending_bot_moves[position_key][
+                                            "tempo_from_book"
+                                        ] = tempo_from_book
+
+                                        if tempo_delay > 0.0:
+                                            time.sleep(tempo_delay)
+                                    else:
+                                        if tempo_delay is None:
+                                            tempo_delay = 0.0
 
                                     clicked = click_move(
                                         best_move,
@@ -11982,7 +12015,7 @@ def main():
 
                                     # Keep the tempo result as the final move-related
                                     # log line, after physical verification and state print.
-                                    if 'tempo_delay' in locals():
+                                    if tempo_delay is not None:
                                         print(
                                             "[HUMAN TEMPO] COMPLETE | "
                                             f"move={best_san} "
