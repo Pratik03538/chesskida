@@ -77,6 +77,11 @@ HUMAN_TEMPO_RANDOM_JITTER = 0.07
 # the bot responsive while avoiding an obviously fixed machine interval.
 HUMAN_CLICK_GAP_RANGE = (0.035, 0.095)
 
+# Tempo rhythm state. A mode lasts for several moves so the player has a
+# natural rhythm instead of independently re-rolling a delay every move.
+_human_tempo_mode = None
+_human_tempo_mode_moves_left = 0
+
 # Before the destination click, verify that the SOURCE square itself was
 # actually selected. This prevents a bad source click (for example selecting
 # a queen when Stockfish asked for a bishop) from turning into a legal but
@@ -3633,50 +3638,62 @@ def human_like_move_delay(
     from_book=False
 ):
     """
-    Sample a human-like think delay for one already-selected move.
+    Sample an elite-fast-play-inspired human tempo.
 
-    The profile is inspired by elite fast-play tempo rather than a literal
-    imitation of any specific player's timing. Most moves are quick; tactical
-    and forcing moves receive longer thinking windows; occasional long thinks
-    prevent the timing pattern from becoming uniform.
+    The key difference from simple random timing is rhythm: the bot enters a
+    short fast streak, normal streak, or occasional think phase and keeps that
+    tempo for several moves. Tactical/forcing moves can still override the
+    rhythm upward.
     """
+    global _human_tempo_mode
+    global _human_tempo_mode_moves_left
+
     if not HUMAN_TEMPO_ENABLED:
         return 0.0
 
-    # Book moves are generally played faster, but not at one fixed speed.
-    if from_book:
-        fast_range = (
-            HUMAN_TEMPO_FAST_RANGE[0],
-            min(
-                HUMAN_TEMPO_OPENING_MAX,
-                HUMAN_TEMPO_FAST_RANGE[1] + 0.08
-            )
-        )
-        if random.random() < 0.78:
-            delay = random.uniform(*fast_range)
-        else:
-            delay = random.uniform(
-                HUMAN_TEMPO_NORMAL_RANGE[0],
-                min(HUMAN_TEMPO_OPENING_MAX + 0.22, HUMAN_TEMPO_NORMAL_RANGE[1])
-            )
-    else:
+    # Fresh-game reset. The first Stockfish move of a game can occur either
+    # from move_stack 0 (Stockfish is White) or 1 (human White moved first).
+    if len(board.move_stack) <= 1:
+        _human_tempo_mode = None
+        _human_tempo_mode_moves_left = 0
+
+    # Start a new tempo phase only when the previous phase expires.
+    if (
+        _human_tempo_mode is None
+        or _human_tempo_mode_moves_left <= 0
+    ):
         roll = random.random()
 
-        if roll < HUMAN_TEMPO_FAST_CHANCE:
-            delay = random.uniform(*HUMAN_TEMPO_FAST_RANGE)
-        elif roll < (
-            HUMAN_TEMPO_FAST_CHANCE
-            + HUMAN_TEMPO_NORMAL_CHANCE
-        ):
-            delay = random.uniform(*HUMAN_TEMPO_NORMAL_RANGE)
-        elif roll < (
-            HUMAN_TEMPO_FAST_CHANCE
-            + HUMAN_TEMPO_NORMAL_CHANCE
-            + HUMAN_TEMPO_DEEP_CHANCE
-        ):
-            delay = random.uniform(*HUMAN_TEMPO_DEEP_RANGE)
+        if from_book and roll < 0.72:
+            _human_tempo_mode = "FAST"
+            _human_tempo_mode_moves_left = random.randint(2, 5)
+        elif roll < 0.46:
+            _human_tempo_mode = "FAST"
+            _human_tempo_mode_moves_left = random.randint(2, 5)
+        elif roll < 0.83:
+            _human_tempo_mode = "NORMAL"
+            _human_tempo_mode_moves_left = random.randint(2, 4)
+        elif roll < 0.94:
+            _human_tempo_mode = "BURST"
+            _human_tempo_mode_moves_left = random.randint(1, 2)
         else:
-            delay = random.uniform(*HUMAN_TEMPO_LONG_RANGE)
+            _human_tempo_mode = "DEEP"
+            _human_tempo_mode_moves_left = random.randint(1, 2)
+
+    mode = _human_tempo_mode
+
+    if mode == "FAST":
+        delay = random.uniform(0.18, 0.46)
+    elif mode == "BURST":
+        delay = random.uniform(0.12, 0.28)
+    elif mode == "DEEP":
+        delay = random.uniform(1.10, 2.15)
+    else:
+        delay = random.uniform(0.40, 0.92)
+
+    # Book moves get a slightly snappier baseline without becoming identical.
+    if from_book:
+        delay *= random.uniform(0.78, 0.94)
 
     # Position-aware modifiers.
     try:
@@ -3689,7 +3706,6 @@ def human_like_move_delay(
         if move.promotion is not None:
             delay *= HUMAN_TEMPO_PROMOTION_MULT
 
-        # Busy positions naturally deserve a little more thought.
         legal_count = board.legal_moves.count()
 
         if legal_count <= 12:
@@ -3697,21 +3713,30 @@ def human_like_move_delay(
         elif legal_count >= 35:
             delay *= HUMAN_TEMPO_QUIET_MULT
 
-        # Opening tempo: keep the first handful of moves snappy.
+        # A forcing move can break a long deep think: even when the current
+        # rhythm is FAST, checks/captures are allowed to become more deliberate.
+        if (
+            (board.is_capture(move) or board.gives_check(move))
+            and delay < 0.30
+        ):
+            delay += random.uniform(0.08, 0.22)
+
+        # Opening stays quick.
         if len(board.move_stack) < 12:
             delay = min(
                 delay,
                 HUMAN_TEMPO_OPENING_MAX
             )
     except Exception:
-        # Timing must never break move execution if a board probe fails.
         pass
 
-    # Small final jitter prevents repeated identical-looking intervals.
+    # Small jitter is intentionally much smaller than the rhythm differences.
     delay += random.uniform(
         -HUMAN_TEMPO_RANDOM_JITTER,
         HUMAN_TEMPO_RANDOM_JITTER
     )
+
+    _human_tempo_mode_moves_left -= 1
 
     return max(
         0.12,
@@ -3720,7 +3745,6 @@ def human_like_move_delay(
             delay
         )
     )
-
 
 def human_like_click_gap():
     """Return a small variable pickup-to-drop interval."""
