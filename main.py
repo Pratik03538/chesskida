@@ -94,8 +94,16 @@ OPENING_PREMOVE_MAX_AGE = 180.0
 # bot move is deterministic until the real human move is known.
 OPENING_PREMOVE_PHYSICAL_ENABLED = True
 OPENING_PREMOVE_PHYSICAL_GAP = 0.001
-OPENING_PREMOVE_PHYSICAL_WAIT = 0.090
+# Strict rule: once the real opponent move is detected, the armed premove
+# must physically appear within 1.0 second or it is considered failed.
+OPENING_PREMOVE_PHYSICAL_WAIT = 1.000
 OPENING_PREMOVE_PHYSICAL_MAX_AGE = 15.0
+
+# Before calling a premove "armed", verify that the board UI actually reacted
+# to both source and destination clicks while the underlying piece placement
+# stayed unchanged.
+OPENING_PREMOVE_ARM_CONFIRM_WAIT = 0.080
+OPENING_PREMOVE_ARM_CHANGE_MIN = 0.0010
 
 # Tempo rhythm state. A mode lasts for several moves so the player has a
 # natural rhythm instead of independently re-rolling a delay every move.
@@ -3885,6 +3893,7 @@ def get_opening_premove(
 
 
 def arm_physical_opening_premove(
+    sct,
     cache,
     board,
     predicted_human_uci,
@@ -3976,8 +3985,21 @@ def arm_physical_opening_premove(
             f"| source=({sx},{sy}) target=({tx},{ty})"
         )
 
+        before_arm_frame = capture_screen(
+            sct,
+            scrcpy_hwnd
+        )
+
+        if before_arm_frame is None:
+            print(
+                "[PREMOVE-QUEUE] ARM FAILED | "
+                f"could not capture pre-queue board | bot={bot_move.uci()}"
+            )
+            return None
+
         user32.SetCursorPos(0, 0)
 
+        # SOURCE CLICK: this must really select the intended piece.
         if not left_click_screen(
             sx,
             sy,
@@ -3989,10 +4011,59 @@ def arm_physical_opening_premove(
             )
             return None
 
+        source_frame = capture_screen(
+            sct,
+            scrcpy_hwnd
+        )
+
+        if source_frame is None:
+            print(
+                "[PREMOVE-QUEUE] ARM FAILED | "
+                f"source confirmation frame missing | bot={bot_move.uci()}"
+            )
+            return None
+
+        source_changes = fast_square_motion_scores(
+            before_arm_frame,
+            source_frame,
+            board_coords,
+            black_perspective
+        )
+
+        source_change = (
+            source_changes.get(
+                bot_move.from_square,
+                0.0
+            )
+            if source_changes is not None
+            else 0.0
+        )
+
+        source_board_ok, _ = full_board_state_confirmed(
+            source_frame,
+            board,
+            board_coords,
+            black_perspective
+        )
+
+        if (
+            not source_board_ok
+            or source_change < OPENING_PREMOVE_ARM_CHANGE_MIN
+        ):
+            print(
+                "[PREMOVE-QUEUE] ARM FAILED | "
+                "source click did not produce a valid selection state | "
+                f"bot={bot_move.uci()} "
+                f"| source_change={source_change:.4f} "
+                f"| board_unchanged={source_board_ok}"
+            )
+            return None
+
         time.sleep(
             OPENING_PREMOVE_PHYSICAL_GAP
         )
 
+        # DESTINATION CLICK: this completes the native premove request.
         if not left_click_screen(
             tx,
             ty,
@@ -4005,6 +4076,90 @@ def arm_physical_opening_premove(
             return None
 
         user32.SetCursorPos(0, 0)
+
+        arm_deadline = (
+            time.perf_counter()
+            + OPENING_PREMOVE_ARM_CONFIRM_WAIT
+        )
+
+        armed_frame = None
+        target_change = 0.0
+        final_source_change = source_change
+
+        while time.perf_counter() < arm_deadline:
+            check_frame = capture_screen(
+                sct,
+                scrcpy_hwnd
+            )
+
+            if check_frame is None:
+                time.sleep(BOT_RECOVERY_POLL)
+                continue
+
+            changes = fast_square_motion_scores(
+                before_arm_frame,
+                check_frame,
+                board_coords,
+                black_perspective
+            )
+
+            if changes is None:
+                time.sleep(BOT_RECOVERY_POLL)
+                continue
+
+            final_source_change = max(
+                final_source_change,
+                changes.get(
+                    bot_move.from_square,
+                    0.0
+                )
+            )
+
+            target_change = max(
+                target_change,
+                changes.get(
+                    bot_move.to_square,
+                    0.0
+                )
+            )
+
+            # The piece placement must still be the current board. Highlights
+            # / selection graphics may change, but the actual pieces cannot.
+            unchanged_ok, _ = full_board_state_confirmed(
+                check_frame,
+                board,
+                board_coords,
+                black_perspective
+            )
+
+            if (
+                unchanged_ok
+                and final_source_change
+                >= OPENING_PREMOVE_ARM_CHANGE_MIN
+                and target_change
+                >= OPENING_PREMOVE_ARM_CHANGE_MIN
+            ):
+                armed_frame = check_frame
+                break
+
+            time.sleep(BOT_RECOVERY_POLL)
+
+        if armed_frame is None:
+            print(
+                "[PREMOVE-QUEUE] ARM FAILED | "
+                "source+destination native queue state not confirmed | "
+                f"bot={bot_move.uci()} "
+                f"| source={final_source_change:.4f} "
+                f"| target={target_change:.4f}"
+            )
+            return None
+
+        print(
+            "[PREMOVE-QUEUE] ARMED-CONFIRMED | "
+            f"bot={bot_move.uci()} "
+            f"| source={final_source_change:.4f} "
+            f"| target={target_change:.4f}"
+        )
 
         return {
             "current_fen": board.fen(),
@@ -11413,6 +11568,7 @@ def main():
                         ):
                             staged_premove = (
                                 arm_physical_opening_premove(
+                                    sct,
                                     opening_premove_cache,
                                     board,
                                     next_human_best_uci,
@@ -11536,6 +11692,7 @@ def main():
                             premove_combo_ok = False
                             premove_combo_frame = None
                             premove_combo_reason = ""
+                            premove_combo_elapsed = None
 
                             if opening_premove_armed is not None:
                                 armed_age = (
@@ -11575,6 +11732,8 @@ def main():
                                             armed_bot_move
                                             in expected_human_board.legal_moves
                                         ):
+                                            premove_wait_start = time.perf_counter()
+
                                             (
                                                 premove_combo_ok,
                                                 premove_combo_frame,
@@ -11585,8 +11744,28 @@ def main():
                                                 expected_human_board,
                                                 armed_bot_move,
                                                 cached_board_coords,
-                                                visual_black_perspective
+                                                visual_black_perspective,
+                                                timeout=OPENING_PREMOVE_PHYSICAL_WAIT
                                             )
+
+                                            premove_combo_elapsed = (
+                                                time.perf_counter()
+                                                - premove_wait_start
+                                            )
+
+                                            if premove_combo_ok:
+                                                premove_combo_reason = (
+                                                    premove_combo_reason
+                                                    + f" | fire_time={premove_combo_elapsed:.3f}s"
+                                                )
+                                            else:
+                                                print(
+                                                    "[PREMOVE-QUEUE] TIMEOUT | "
+                                                    f"bot={armed_bot_move.uci()} "
+                                                    f"| waited={premove_combo_elapsed:.3f}s "
+                                                    "| >1.000s => premove FAILED"
+                                                )
+                                                opening_premove_armed = None
                                     except Exception:
                                         premove_combo_ok = False
 
@@ -11618,8 +11797,47 @@ def main():
                                     "[PREMOVE-QUEUE] AUTO-EXECUTED | "
                                     f"human={move.uci()} "
                                     f"| bot={opening_premove_armed.get('bot_uci','-')} "
-                                    "| combined board confirmed"
+                                    f"| combined board confirmed "
+                                    f"| fire_time={premove_combo_elapsed:.3f}s"
                                 )
+
+                                # The physical board is already ahead by the queued
+                                # Stockfish move. Commit BOTH confirmed moves now,
+                                # so the normal Stockfish click path is never entered.
+                                premove_bot_move = chess.Move.from_uci(
+                                    opening_premove_armed["bot_uci"]
+                                )
+
+                                board.push(move)
+                                board.push(premove_bot_move)
+
+                                opening_premove_cache.pop(
+                                    expected_human_board.fen(),
+                                    None
+                                )
+                                opening_premove_armed = None
+                                pending_bot_moves.clear()
+                                next_human_best_uci = None
+                                last_bot_position_key = None
+                                next_main_turn_rescan = (
+                                    time.perf_counter()
+                                    + TURN_RESCAN_INTERVAL
+                                )
+
+                                baseline_frame = (
+                                    premove_combo_frame
+                                    if premove_combo_frame is not None
+                                    else baseline_frame
+                                )
+
+                                print(
+                                    "[PREMOVE-QUEUE] COMMITTED | "
+                                    f"human={move.uci()} "
+                                    f"| bot={premove_bot_move.uci()} "
+                                    "| zero-delay next turn"
+                                )
+
+                                continue
 
                             elif detection_source in (
                                 "ULTRA_DELTA",
@@ -12337,10 +12555,11 @@ def main():
                                     scrcpy_hwnd
                                 )
 
-                                # The native premove may have executed during
-                                # the human move. Confirm it directly before any
-                                # fallback click so the bot never double-clicks
-                                # an already-executed physical premove.
+                                # A physical premove must have fired during the
+                                # human-move transition. The primary path waits up
+                                # to one second above; this defensive check prevents
+                                # a second click from being sent after a late native
+                                # execution.
                                 if (
                                     not verified
                                     and physical_premove_pending
