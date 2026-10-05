@@ -133,18 +133,19 @@ CLICK_CIRCLE_AREA = 0.08
 CLICK_CIRCLE_RADIUS_FRACTION = math.sqrt(CLICK_CIRCLE_AREA / math.pi)
 
 # Natural bot move timing.
-# Every move gets a slightly different delay.  Occasional tactical/strategic
-# moments get a longer pause, while retries stay on the existing fast path.
-BOT_NATURAL_DELAY_MIN = 0.12
-BOT_NATURAL_DELAY_MAX = 0.58
-BOT_TACTICAL_DELAY_MIN = 0.52
-BOT_TACTICAL_DELAY_MAX = 0.88
+# Ordinary moves vary from almost instant to about half a second.
+# Tactical moves get NO extra thinking delay.
+# Strong strategic positions occasionally get a longer human-like pause.
+# A sudden M5-or-closer position gets exactly one 1-2 second pause; the
+# following mate moves are then played immediately.
+BOT_NATURAL_DELAY_MIN = 0.00
+BOT_NATURAL_DELAY_MAX = 0.50
 BOT_STRATEGIC_DELAY_MIN = 0.62
-BOT_STRATEGIC_DELAY_MAX = 1.05
-BOT_MATE_DELAY_MIN = 0.78
-BOT_MATE_DELAY_MAX = 1.18
-BOT_STRATEGIC_CHANCE = 0.18
-BOT_LONG_THINK_CHANCE = 0.08
+BOT_STRATEGIC_DELAY_MAX = 2.05
+BOT_MATE_DELAY_MIN = 1.00
+BOT_MATE_DELAY_MAX = 2.00
+BOT_STRATEGIC_CHANCE = 0.22
+BOT_STRONG_FAVOR_CP = 250
 BOT_DELAY_REPEAT_GAP = 0.045
 
 # Retained as counters for match-state reset/log compatibility.
@@ -2327,6 +2328,7 @@ PROGRESS_INTERVAL = 0.35
 _progress_times = {}
 _progress_last_text = {}
 _last_bot_natural_delay = None
+_mate_pause_used = False
 
 
 def progress(stage, detail="", key=None, interval=PROGRESS_INTERVAL, force=False):
@@ -7767,95 +7769,112 @@ def natural_bot_move_delay(
     selection_meta=None,
     moves_since_buffer=0
 ):
-    """Return a varied pre-click delay for the next bot move.
+    """Return a varied pre-click delay for the next bot move only.
 
-    Move choice, verification, and retries are untouched.  This function only
-    controls the first-click waiting time and deliberately avoids a fixed
-    per-move sleep.
+    Move selection, physical verification, and retry timing are untouched.
     """
     global _last_bot_natural_delay
+    global _mate_pause_used
 
     selection_meta = selection_meta or {}
 
-    # Prefer a small, varied "thinking" delay on ordinary moves.
-    delay = random.triangular(
+    # A new game starts at 0 or 1 plies. Reset the one-time mate pause here so
+    # it also works for GM-book opening moves, where Stockfish is not queried.
+    if len(board.move_stack) <= 1:
+        _mate_pause_used = False
+
+    # Read the current position's best mate distance from MultiPV #1.
+    best_mate = None
+    if engine_result is not None:
+        try:
+            score_obj = engine_result.get("score")
+            if score_obj is not None:
+                best_mate = score_obj.pov(board.turn).mate()
+        except Exception:
+            best_mate = None
+
+    # A sudden M5/M4/M3/M2/M1 situation gets ONE pause. After that, all
+    # subsequent mating moves are instant. Reset only when the mating threat
+    # is no longer in the M5-or-closer zone, allowing a later fresh M5 sequence.
+    if best_mate is not None and 0 < best_mate <= 5:
+        if not _mate_pause_used:
+            _mate_pause_used = True
+            delay = random.uniform(
+                BOT_MATE_DELAY_MIN,
+                BOT_MATE_DELAY_MAX
+            )
+            _last_bot_natural_delay = delay
+            return delay
+    elif best_mate is None or best_mate > 5:
+        _mate_pause_used = False
+
+    # Tactical moves (check/capture/castling/promotion) are immediate.
+    try:
+        tactical = (
+            board.gives_check(move)
+            or board.is_capture(move)
+            or move.promotion is not None
+            or board.is_castling(move)
+        )
+    except Exception:
+        tactical = False
+
+    if tactical:
+        return 0.0
+
+    # Ordinary moves are drawn from the full 0-0.5s range, so there is no
+    # fixed cadence and some moves can be nearly instant.
+    delay = random.uniform(
         BOT_NATURAL_DELAY_MIN,
-        BOT_NATURAL_DELAY_MAX,
-        0.26
+        BOT_NATURAL_DELAY_MAX
     )
 
-    try:
-        gives_check = board.gives_check(move)
-    except Exception:
-        gives_check = False
-
-    try:
-        after = board.copy(stack=False)
-        after.push(move)
-        is_mate = after.is_checkmate()
-    except Exception:
-        after = None
-        is_mate = False
-
-    # Strong tactical moments: check, capture, promotion, castling.
-    tactical = (
-        gives_check
-        or board.is_capture(move)
-        or move.promotion is not None
-        or board.is_castling(move)
-    )
-
-    # "Strategic" means the selector chose the engine/book top move, but only
-    # occasionally take the longer-thought branch so the timing distribution
-    # stays varied rather than adding a pause to every #1 move.
+    # Occasionally give a stronger strategic move a noticeably longer think.
+    # We use the selected rank/current evaluation as a pre-move proxy; exact
+    # post-move "Great/Brilliant" labels are calculated later in the existing
+    # analysis path and are intentionally not re-run here.
     rank = selection_meta.get("rank")
-    top_choice = rank == 0
-    strategic = top_choice and (
-        random.random() < BOT_STRATEGIC_CHANCE
+    current_cp = selection_meta.get("current_cp")
+    selected_cp = selection_meta.get("selected_cp")
+
+    high_favor = (
+        isinstance(current_cp, (int, float))
+        and float(current_cp) >= BOT_STRONG_FAVOR_CP
+    )
+    strong_selected = (
+        isinstance(selected_cp, (int, float))
+        and float(selected_cp) >= BOT_STRONG_FAVOR_CP
+    )
+    strategic_candidate = (
+        (rank == 0 or high_favor or strong_selected)
+        and random.random() < BOT_STRATEGIC_CHANCE
     )
 
-    if is_mate:
-        delay = random.uniform(
-            BOT_MATE_DELAY_MIN,
-            BOT_MATE_DELAY_MAX
-        )
-    elif tactical and random.random() < 0.45:
-        delay = random.uniform(
-            BOT_TACTICAL_DELAY_MIN,
-            BOT_TACTICAL_DELAY_MAX
-        )
-    elif strategic:
-        delay = random.uniform(
-            BOT_STRATEGIC_DELAY_MIN,
-            BOT_STRATEGIC_DELAY_MAX
-        )
-    elif (
-        moves_since_buffer >= random.randint(
-            RANDOM_BUFFER_MOVE_MIN,
-            RANDOM_BUFFER_MOVE_MAX
-        )
-        and random.random() < BOT_LONG_THINK_CHANCE
-    ):
+    if strategic_candidate:
         delay = random.uniform(
             BOT_STRATEGIC_DELAY_MIN,
             BOT_STRATEGIC_DELAY_MAX
         )
 
-    # Avoid producing the exact/similarly-close same delay twice in a row.
+    # Avoid nearly repeating the exact same ordinary/strategic delay.
     if _last_bot_natural_delay is not None:
         if abs(delay - _last_bot_natural_delay) < BOT_DELAY_REPEAT_GAP:
             delta = random.uniform(
                 BOT_DELAY_REPEAT_GAP,
                 BOT_DELAY_REPEAT_GAP * 2.5
             )
-            if delay + delta <= BOT_MATE_DELAY_MAX:
+            upper = (
+                BOT_STRATEGIC_DELAY_MAX
+                if strategic_candidate
+                else BOT_NATURAL_DELAY_MAX
+            )
+            if delay + delta <= upper:
                 delay += delta
             elif delay - delta >= BOT_NATURAL_DELAY_MIN:
                 delay -= delta
 
     _last_bot_natural_delay = delay
     return max(0.0, float(delay))
-
 
 def build_analysis(
     engine,
