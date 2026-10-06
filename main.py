@@ -140,14 +140,22 @@ CLICK_CIRCLE_RADIUS_FRACTION = math.sqrt(CLICK_CIRCLE_AREA / math.pi)
 # Strong strategic positions occasionally get a longer human-like pause.
 # A sudden M5-or-closer position gets exactly one 1-2 second pause; the
 # following mate moves are then played immediately.
-BOT_NATURAL_DELAY_MIN = 0.00
-BOT_NATURAL_DELAY_MAX = 0.50
+BOT_NATURAL_DELAY_MIN = 0.08
+BOT_NATURAL_DELAY_MAX = 0.45
 BOT_STRATEGIC_DELAY_MIN = 0.62
-BOT_STRATEGIC_DELAY_MAX = 2.05
+BOT_STRATEGIC_DELAY_MAX = 1.55
 BOT_MATE_DELAY_MIN = 1.00
 BOT_MATE_DELAY_MAX = 2.00
+
+# Do NOT add thinking time to every move. Most moves stay immediate;
+# occasional pauses are reserved for moves a human is genuinely likely
+# to think about. A cooldown prevents back-to-back artificial pauses.
+BOT_NATURAL_DELAY_CHANCE = 0.20
+BOT_THINKWORTHY_DELAY_CHANCE = 0.28
 BOT_STRATEGIC_CHANCE = 0.22
 BOT_STRONG_FAVOR_CP = 250
+BOT_DELAY_COOLDOWN_MIN = 2
+BOT_DELAY_COOLDOWN_MAX = 4
 BOT_DELAY_REPEAT_GAP = 0.045
 
 # Small random gap between SOURCE and DESTINATION clicks.
@@ -2344,6 +2352,7 @@ PROGRESS_INTERVAL = 0.35
 _progress_times = {}
 _progress_last_text = {}
 _last_bot_natural_delay = None
+_natural_delay_cooldown_moves = 0
 _mate_pause_used = False
 
 
@@ -7924,19 +7933,25 @@ def natural_bot_move_delay(
     selection_meta=None,
     moves_since_buffer=0
 ):
-    """Return a varied pre-click delay for the next bot move only.
+    """Return an occasional human-like pre-click pause.
 
-    Move selection, physical verification, and retry timing are untouched.
+    Most bot moves are intentionally immediate. A short pause is used only
+    occasionally, while stronger/think-worthy moves can sometimes get a
+    longer pause. Consecutive artificial pauses are blocked by a small
+    move-based cooldown. Pending retries never call this function.
     """
     global _last_bot_natural_delay
+    global _natural_delay_cooldown_moves
     global _mate_pause_used
 
     selection_meta = selection_meta or {}
 
-    # A new game starts at 0 or 1 plies. Reset the one-time mate pause here so
-    # it also works for GM-book opening moves, where Stockfish is not queried.
+    # Reset timing state at a fresh game so the first game move can behave
+    # naturally without inheriting a cooldown from the previous game.
     if len(board.move_stack) <= 1:
         _mate_pause_used = False
+        _natural_delay_cooldown_moves = 0
+        _last_bot_natural_delay = None
 
     # Read the current position's best mate distance from MultiPV #1.
     best_mate = None
@@ -7948,9 +7963,8 @@ def natural_bot_move_delay(
         except Exception:
             best_mate = None
 
-    # A sudden M5/M4/M3/M2/M1 situation gets ONE pause. After that, all
-    # subsequent mating moves are instant. Reset only when the mating threat
-    # is no longer in the M5-or-closer zone, allowing a later fresh M5 sequence.
+    # A sudden M5/M4/M3/M2/M1 situation gets ONE pause. After that,
+    # subsequent mating moves are immediate until the threat leaves M5.
     if best_mate is not None and 0 < best_mate <= 5:
         if not _mate_pause_used:
             _mate_pause_used = True
@@ -7959,11 +7973,17 @@ def natural_bot_move_delay(
                 BOT_MATE_DELAY_MAX
             )
             _last_bot_natural_delay = delay
+            _natural_delay_cooldown_moves = (
+                random.randint(
+                    BOT_DELAY_COOLDOWN_MIN,
+                    BOT_DELAY_COOLDOWN_MAX
+                )
+            )
             return delay
     elif best_mate is None or best_mate > 5:
         _mate_pause_used = False
 
-    # Tactical moves (check/capture/castling/promotion) are immediate.
+    # Tactical moves should feel reactive, not thoughtful.
     try:
         tactical = (
             board.gives_check(move)
@@ -7975,19 +7995,18 @@ def natural_bot_move_delay(
         tactical = False
 
     if tactical:
+        if _natural_delay_cooldown_moves > 0:
+            _natural_delay_cooldown_moves -= 1
+        _last_bot_natural_delay = 0.0
         return 0.0
 
-    # Ordinary moves are drawn from the full 0-0.5s range, so there is no
-    # fixed cadence and some moves can be nearly instant.
-    delay = random.uniform(
-        BOT_NATURAL_DELAY_MIN,
-        BOT_NATURAL_DELAY_MAX
-    )
+    # Cooldown is move-based, so two artificial pauses cannot appear on
+    # consecutive ordinary moves.
+    if _natural_delay_cooldown_moves > 0:
+        _natural_delay_cooldown_moves -= 1
+        _last_bot_natural_delay = 0.0
+        return 0.0
 
-    # Occasionally give a stronger strategic move a noticeably longer think.
-    # We use the selected rank/current evaluation as a pre-move proxy; exact
-    # post-move "Great/Brilliant" labels are calculated later in the existing
-    # analysis path and are intentionally not re-run here.
     rank = selection_meta.get("rank")
     current_cp = selection_meta.get("current_cp")
     selected_cp = selection_meta.get("selected_cp")
@@ -8000,36 +8019,58 @@ def natural_bot_move_delay(
         isinstance(selected_cp, (int, float))
         and float(selected_cp) >= BOT_STRONG_FAVOR_CP
     )
-    strategic_candidate = (
-        (rank == 0 or high_favor or strong_selected)
-        and random.random() < BOT_STRATEGIC_CHANCE
+
+    thinkworthy = (
+        rank == 0
+        or high_favor
+        or strong_selected
     )
 
-    if strategic_candidate:
+    # Strong moves only occasionally get a longer think. Otherwise use a
+    # shorter human-like pause at a lower frequency; most moves are instant.
+    if thinkworthy and random.random() < BOT_THINKWORTHY_DELAY_CHANCE:
         delay = random.uniform(
             BOT_STRATEGIC_DELAY_MIN,
             BOT_STRATEGIC_DELAY_MAX
         )
+    elif random.random() < BOT_NATURAL_DELAY_CHANCE:
+        delay = random.uniform(
+            BOT_NATURAL_DELAY_MIN,
+            BOT_NATURAL_DELAY_MAX
+        )
+    else:
+        _last_bot_natural_delay = 0.0
+        return 0.0
 
-    # Avoid nearly repeating the exact same ordinary/strategic delay.
-    if _last_bot_natural_delay is not None:
+    # Avoid near-identical pauses when a previous pause was used.
+    if _last_bot_natural_delay is not None and _last_bot_natural_delay > 0:
         if abs(delay - _last_bot_natural_delay) < BOT_DELAY_REPEAT_GAP:
-            delta = random.uniform(
+            retry = random.uniform(
                 BOT_DELAY_REPEAT_GAP,
                 BOT_DELAY_REPEAT_GAP * 2.5
             )
             upper = (
                 BOT_STRATEGIC_DELAY_MAX
-                if strategic_candidate
+                if thinkworthy and delay >= BOT_STRATEGIC_DELAY_MIN
                 else BOT_NATURAL_DELAY_MAX
             )
-            if delay + delta <= upper:
-                delay += delta
-            elif delay - delta >= BOT_NATURAL_DELAY_MIN:
-                delay -= delta
+
+            if delay + retry <= upper:
+                delay += retry
+            elif delay - retry >= (
+                BOT_STRATEGIC_DELAY_MIN
+                if thinkworthy and delay >= BOT_STRATEGIC_DELAY_MIN
+                else BOT_NATURAL_DELAY_MIN
+            ):
+                delay -= retry
 
     _last_bot_natural_delay = delay
+    _natural_delay_cooldown_moves = random.randint(
+        BOT_DELAY_COOLDOWN_MIN,
+        BOT_DELAY_COOLDOWN_MAX
+    )
     return max(0.0, float(delay))
+
 
 def build_analysis(
     engine,
