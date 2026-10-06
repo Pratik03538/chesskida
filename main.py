@@ -147,20 +147,19 @@ BOT_STRATEGIC_DELAY_MAX = 1.30
 BOT_MATE_DELAY_MIN = 1.00
 BOT_MATE_DELAY_MAX = 2.00
 
-# Do NOT add thinking time to every move. Use one genuinely human-like
-# thinking pause only after a random 10-15 bot-move interval. Every interval
-# is randomized again, so the pause never lands on a fixed move number.
-# Long thinking pauses stop after move 40 because the game is usually entering
-# endgame territory.
+# Keep normal bot moves extremely fast, but add only 1-2 genuine
+# human-like thinking pauses somewhere between bot moves 15 and 40.
+# The pause duration is intentionally much longer (2-5s) so it feels like
+# the player is actually thinking rather than just having network/GUI delay.
 BOT_EVERY_MOVE_DELAY_MIN = 0.000
 BOT_EVERY_MOVE_DELAY_MAX = 0.010
-BOT_THINK_PAUSE_MIN = 0.25
-BOT_THINK_PAUSE_MAX = 0.75
+BOT_THINK_PAUSE_MIN = 2.0
+BOT_THINK_PAUSE_MAX = 5.0
 BOT_THINK_PAUSE_FIRST_MOVE = 15
 BOT_THINK_PAUSE_LAST_MOVE = 40
-BOT_THINK_PAUSE_CANDIDATES_MIN = 2
-BOT_THINK_PAUSE_CANDIDATES_MAX = 3
-BOT_THINK_PAUSE_TAKE_CHANCE = 0.70
+BOT_THINK_PAUSE_CANDIDATES_MIN = 1
+BOT_THINK_PAUSE_CANDIDATES_MAX = 2
+BOT_THINK_PAUSE_TAKE_CHANCE = 1.00
 BOT_OPENING_FAST_VERIFY_MOVES = 10
 BOT_STRONG_FAVOR_CP = 250
 BOT_DELAY_REPEAT_GAP = 0.045
@@ -2361,6 +2360,7 @@ _progress_last_text = {}
 _last_bot_natural_delay = None
 _bot_timing_move_count = 0
 _bot_think_pause_targets = ()
+_bot_think_pause_used = 0
 _mate_pause_used = False
 
 
@@ -7964,18 +7964,17 @@ def natural_bot_move_delay(
     selection_meta=None,
     moves_since_buffer=0
 ):
-    """Return a 0-10ms delay on every move plus optional midgame pauses.
+    """Return a 0-10ms delay on every move plus 1-2 human-like pauses.
 
-    Every first-attempt bot move gets a random 0-10ms base delay.
-    Between bot moves 15-40, the game randomly chooses only 2-3 candidate
-    moments for a possible 0.5-1.5s thinking pause. A pause is taken only when
-    the move is non-tactical / genuinely think-worthy; a candidate can also be
-    skipped, so there is never a forced pause on an unsuitable move.
-    Pending retries never call this function.
+    Exactly 1-2 pause targets are chosen randomly per game inside the
+    15-40 bot-move window. Each eligible target gets a 2-5s thinking pause.
+    Tactical / forced-looking moves still skip the pause, while pending
+    retries never call this function and therefore never repeat the pause.
     """
     global _last_bot_natural_delay
     global _bot_timing_move_count
     global _bot_think_pause_targets
+    global _bot_think_pause_used
 
     # Reset timing state at the beginning of a new game.
     if len(board.move_stack) <= 1:
@@ -7995,6 +7994,7 @@ def natural_bot_move_delay(
                 )
             )
         )
+        _bot_think_pause_used = 0
         _last_bot_natural_delay = None
 
     # Only first-attempt bot decisions consume a timing move number.
@@ -8007,9 +8007,13 @@ def natural_bot_move_delay(
     )
     delay = base_delay
 
-    # Optional thinking pause: only on randomly selected move numbers in the
-    # 15-40 window, and only when the move actually looks think-worthy.
-    if _bot_timing_move_count in _bot_think_pause_targets:
+    # 1-2 human-like thinking pauses, randomly placed between moves 15-40.
+    # Never pause twice on the same game move, and never pause more than the
+    # randomly selected 1-2 total targets.
+    if (
+        _bot_think_pause_used < BOT_THINK_PAUSE_CANDIDATES_MAX
+        and _bot_timing_move_count in _bot_think_pause_targets
+    ):
         tactical = (
             board.is_capture(move)
             or board.is_castling(move)
@@ -8027,14 +8031,29 @@ def natural_bot_move_delay(
             not tactical
             and (
                 (isinstance(rank, int) and rank >= 2)
-                or source not in {"GM_BOOK", "FREE_CAPTURE", "QUEEN_PROMOTION", "MATE_CLEANUP"}
+                or source not in {
+                    "GM_BOOK",
+                    "FREE_CAPTURE",
+                    "QUEEN_PROMOTION",
+                    "MATE_CLEANUP"
+                }
             )
         )
 
-        if thinkworthy and random.random() < BOT_THINK_PAUSE_TAKE_CHANCE:
-            delay += random.uniform(
+        if thinkworthy:
+            think_pause = random.uniform(
                 BOT_THINK_PAUSE_MIN,
                 BOT_THINK_PAUSE_MAX
+            )
+            delay += think_pause
+            _bot_think_pause_used += 1
+            print(
+                "[BOT THINK PAUSE] "
+                f"move={_bot_timing_move_count} "
+                f"duration={think_pause:.3f}s "
+                f"used={_bot_think_pause_used}/"
+                f"{len(_bot_think_pause_targets)}",
+                flush=True
             )
 
     _last_bot_natural_delay = base_delay
