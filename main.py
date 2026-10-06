@@ -7946,9 +7946,6 @@ def natural_bot_move_delay(
     global _last_bot_natural_delay
     global _bot_timing_move_count
     global _next_bot_think_pause_at
-    global _mate_pause_used
-
-    selection_meta = selection_meta or {}
 
     # A new game starts at 0 or 1 plies. Reset the timing scheduler so the
     # previous game's pause position can never leak into the new game.
@@ -7959,38 +7956,10 @@ def natural_bot_move_delay(
             BOT_THINK_PAUSE_AFTER_MAX_MOVES
         )
         _last_bot_natural_delay = None
-        _mate_pause_used = False
 
     # Count only first-attempt bot decisions. Pending retries do not call this
     # function, so a retry cannot consume another timing slot.
     _bot_timing_move_count += 1
-
-    # Sudden M5/M4/M3/M2/M1 gets one short special pause while still in the
-    # midgame timing window. After that, the mating sequence is immediate.
-    best_mate = None
-    if engine_result is not None:
-        try:
-            score_obj = engine_result.get("score")
-            if score_obj is not None:
-                best_mate = score_obj.pov(board.turn).mate()
-        except Exception:
-            best_mate = None
-
-    if (
-        best_mate is not None
-        and 0 < best_mate <= 5
-        and _bot_timing_move_count <= BOT_THINK_PAUSE_LAST_MOVE
-        and not _mate_pause_used
-    ):
-        _mate_pause_used = True
-        delay = random.uniform(
-            BOT_MATE_DELAY_MIN,
-            BOT_MATE_DELAY_MAX
-        )
-        _last_bot_natural_delay = delay
-        return delay
-    elif best_mate is None or best_mate > 5:
-        _mate_pause_used = False
 
     # Tactical moves are reactive and should never receive an artificial
     # thinking pause.
@@ -8009,7 +7978,7 @@ def natural_bot_move_delay(
         return 0.0
 
     # Primary human-like pause scheduler: the trigger distance is randomized
-    # after every pause, so there is no "every 4 moves" cadence.
+    # after every pause, so there is no fixed "every N moves" cadence.
     if (
         _next_bot_think_pause_at is not None
         and _bot_timing_move_count >= _next_bot_think_pause_at
