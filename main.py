@@ -140,10 +140,10 @@ CLICK_CIRCLE_RADIUS_FRACTION = math.sqrt(CLICK_CIRCLE_AREA / math.pi)
 # Strong strategic positions occasionally get a longer human-like pause.
 # A sudden M5-or-closer position gets exactly one 1-2 second pause; the
 # following mate moves are then played immediately.
-BOT_NATURAL_DELAY_MIN = 0.08
-BOT_NATURAL_DELAY_MAX = 0.45
+BOT_NATURAL_DELAY_MIN = 0.00
+BOT_NATURAL_DELAY_MAX = 0.50
 BOT_STRATEGIC_DELAY_MIN = 0.62
-BOT_STRATEGIC_DELAY_MAX = 1.55
+BOT_STRATEGIC_DELAY_MAX = 2.05
 BOT_MATE_DELAY_MIN = 1.00
 BOT_MATE_DELAY_MAX = 2.00
 
