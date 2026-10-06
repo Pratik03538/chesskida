@@ -160,8 +160,8 @@ BOT_DELAY_REPEAT_GAP = 0.045
 
 # Small random gap between SOURCE and DESTINATION clicks.
 # This is the physical move gesture interval, not a thinking delay.
-BOT_SOURCE_TO_TARGET_DELAY_MIN = 0.008
-BOT_SOURCE_TO_TARGET_DELAY_MAX = 0.020
+BOT_SOURCE_TO_TARGET_DELAY_MIN = 0.004
+BOT_SOURCE_TO_TARGET_DELAY_MAX = 0.012
 
 # Retained as counters for match-state reset/log compatibility.
 RANDOM_BUFFER_MOVE_MIN = 5
