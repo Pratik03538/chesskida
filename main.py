@@ -140,28 +140,28 @@ CLICK_CIRCLE_RADIUS_FRACTION = math.sqrt(CLICK_CIRCLE_AREA / math.pi)
 # Strong strategic positions occasionally get a longer human-like pause.
 # A sudden M5-or-closer position gets exactly one 1-2 second pause; the
 # following mate moves are then played immediately.
-BOT_NATURAL_DELAY_MIN = 0.00
-BOT_NATURAL_DELAY_MAX = 0.50
+BOT_NATURAL_DELAY_MIN = 0.15
+BOT_NATURAL_DELAY_MAX = 0.45
 BOT_STRATEGIC_DELAY_MIN = 0.62
-BOT_STRATEGIC_DELAY_MAX = 2.05
+BOT_STRATEGIC_DELAY_MAX = 1.30
 BOT_MATE_DELAY_MIN = 1.00
 BOT_MATE_DELAY_MAX = 2.00
 
 # Do NOT add thinking time to every move. Most moves stay immediate;
 # occasional pauses are reserved for moves a human is genuinely likely
 # to think about. A cooldown prevents back-to-back artificial pauses.
-BOT_NATURAL_DELAY_CHANCE = 0.20
-BOT_THINKWORTHY_DELAY_CHANCE = 0.28
+BOT_NATURAL_DELAY_CHANCE = 0.12
+BOT_THINKWORTHY_DELAY_CHANCE = 0.20
 BOT_STRATEGIC_CHANCE = 0.22
 BOT_STRONG_FAVOR_CP = 250
-BOT_DELAY_COOLDOWN_MIN = 2
-BOT_DELAY_COOLDOWN_MAX = 4
+BOT_DELAY_COOLDOWN_MIN = 3
+BOT_DELAY_COOLDOWN_MAX = 5
 BOT_DELAY_REPEAT_GAP = 0.045
 
 # Small random gap between SOURCE and DESTINATION clicks.
 # This is the physical move gesture interval, not a thinking delay.
 BOT_SOURCE_TO_TARGET_DELAY_MIN = 0.008
-BOT_SOURCE_TO_TARGET_DELAY_MAX = 0.055
+BOT_SOURCE_TO_TARGET_DELAY_MAX = 0.020
 
 # Retained as counters for match-state reset/log compatibility.
 RANDOM_BUFFER_MOVE_MIN = 5
