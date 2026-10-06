@@ -3086,6 +3086,32 @@ def scan_board(frame, board_coords):
     )
 
 
+def board_to_display_grid(
+    board,
+    black_perspective=False
+):
+    """Build the overlay grid directly from the already-verified chess board."""
+    grid = [
+        [None for _ in range(8)]
+        for _ in range(8)
+    ]
+
+    for square, piece in board.piece_map().items():
+        file_ = chess.square_file(square)
+        rank_ = chess.square_rank(square)
+
+        if black_perspective:
+            col = 7 - file_
+            row = rank_
+        else:
+            col = file_
+            row = 7 - rank_
+
+        grid[row][col] = piece.symbol()
+
+    return grid
+
+
 def grid_to_dict(
     grid,
     black_perspective=False
@@ -12440,14 +12466,26 @@ def main():
                                         else after_frame
                                     )
 
-                                    (
-                                        cached_board_grid,
-                                        _,
-                                        last_scan_time_ms
-                                    ) = scan_board(
-                                        baseline_frame,
-                                        cached_board_coords
-                                    )
+                                    # Opening speed-up: during the first 10 bot
+                                    # moves, the internal board is already physically
+                                    # verified, so do not pay for another complete
+                                    # 64-square template scan just to refresh the overlay.
+                                    # Move verification itself is unchanged.
+                                    if len(board.move_stack) <= 20:
+                                        cached_board_grid = board_to_display_grid(
+                                            board,
+                                            visual_black_perspective
+                                        )
+                                        last_scan_time_ms = 0.0
+                                    else:
+                                        (
+                                            cached_board_grid,
+                                            _,
+                                            last_scan_time_ms
+                                        ) = scan_board(
+                                            baseline_frame,
+                                            cached_board_coords
+                                        )
 
                                     pending_bot_moves.pop(
                                         position_key,
