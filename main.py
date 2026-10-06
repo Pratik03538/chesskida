@@ -8304,6 +8304,190 @@ def find_free_mate_cleanup_capture(board, candidates):
     return selected
 
 
+def find_priority_capture(
+    board,
+    candidates,
+    best_cp,
+    force_endgame=False
+):
+    """Prefer safe captures before human-like wandering.
+
+    A capture can come from MultiPV=15 or, for a genuinely free piece, from
+    the complete legal move list. This applies to captures by every piece
+    type, including king captures; the king itself is never a legal victim.
+    """
+    candidate_map = {
+        candidate["move"]: candidate
+        for candidate in candidates
+    }
+
+    own_material = side_material(board, board.turn)
+    enemy_material = side_material(board, not board.turn)
+
+    non_king_pieces = sum(
+        1
+        for piece in board.piece_map().values()
+        if piece.piece_type != chess.KING
+    )
+
+    winning_material = own_material > enemy_material
+    endgame = force_endgame or non_king_pieces <= 10
+
+    choices = []
+
+    for move in board.legal_moves:
+        if not board.is_capture(move):
+            continue
+
+        victim_square = move.to_square
+        if board.is_en_passant(move):
+            victim_square = (
+                move.to_square - 8
+                if board.turn == chess.WHITE
+                else move.to_square + 8
+            )
+
+        victim = board.piece_at(victim_square)
+        if victim is None or victim.color == board.turn:
+            continue
+
+        victim_value = material_value(victim.piece_type)
+        if victim_value <= 0:
+            continue
+
+        mover_piece = board.piece_at(move.from_square)
+        mover_value = (
+            material_value(mover_piece.piece_type)
+            if mover_piece is not None
+            else 0
+        )
+
+        try:
+            after = board.copy(stack=False)
+            after.push(move)
+        except Exception:
+            continue
+
+        if after.is_checkmate():
+            return {
+                "move": move,
+                "info": candidate_map.get(move, {}).get("info")
+                    if move in candidate_map
+                    else None,
+                "rank": (
+                    candidate_map[move]["rank"]
+                    if move in candidate_map
+                    else 0
+                ),
+                "cp": (
+                    candidate_map[move]["cp"]
+                    if move in candidate_map
+                    else best_cp
+                ),
+                "victim_value": victim_value,
+                "reason_tag": "CHECKMATE CAPTURE"
+            }
+
+        immediate_replies = [
+            reply
+            for reply in after.legal_moves
+            if reply.to_square == move.to_square
+        ]
+
+        # A truly free capture: no opponent piece can immediately take the
+        # capturing piece. These are always preferred when we are winning.
+        free_capture = not immediate_replies
+
+        candidate = candidate_map.get(move)
+        candidate_cp = (
+            int(candidate["cp"])
+            if candidate is not None
+            else best_cp
+        )
+
+        # Candidate captures from MultiPV are trusted inside a reasonable
+        # engine-score band. Non-MultiPV captures are used only when they are
+        # genuinely free; this prevents forcing poisoned captures.
+        if candidate is None:
+            if not free_capture:
+                continue
+        else:
+            if candidate_cp < best_cp - FREE_CAPTURE_MAX_CP_DROP:
+                continue
+
+            # Do not trade a high-value piece for a lower-value victim simply
+            # because it happens to be a capture, unless the engine itself
+            # selected it inside the normal safety band.
+            if (
+                not free_capture
+                and victim_value < mover_value
+                and winning_material
+            ):
+                continue
+
+        # In a winning endgame, free captures get an even stronger priority.
+        # Otherwise, only take them ahead of the fuzzy shuffle when the
+        # position is materially/evaluationally favorable.
+        if not free_capture:
+            if endgame and winning_material:
+                # Equal-or-better trades are acceptable in liquidation mode.
+                if victim_value < mover_value:
+                    continue
+            elif candidate is None:
+                continue
+
+        choices.append(
+            {
+                "move": move,
+                "info": (
+                    candidate["info"]
+                    if candidate is not None
+                    else None
+                ),
+                "rank": (
+                    candidate["rank"]
+                    if candidate is not None
+                    else 99
+                ),
+                "cp": candidate_cp,
+                "victim_value": victim_value,
+                "free": free_capture,
+                "mover_value": mover_value,
+                "reason_tag": (
+                    "FREE CAPTURE"
+                    if free_capture
+                    else "SAFE LIQUIDATION CAPTURE"
+                )
+            }
+        )
+
+    if not choices:
+        return None
+
+    # First take the highest-value free target. In endgames, also prefer
+    # favorable liquidation captures over wandering moves.
+    choices.sort(
+        key=lambda item: (
+            1 if item["free"] else 0,
+            item["victim_value"],
+            item["cp"],
+            -item["rank"]
+        ),
+        reverse=True
+    )
+
+    selected = choices[0]
+
+    if (
+        selected["free"]
+        or endgame
+        or winning_material
+    ):
+        return selected
+
+    return None
+
+
 def find_safe_free_capture(
     board,
     candidates,
@@ -8910,27 +9094,28 @@ def choose_stockfish_move(
         )
 
     if best_cp > MIN_POSITIVE_CP:
-        # Before normal fuzzy selection, take an actually free minor/major
-        # piece when the candidate is still reasonably close to #1.
-        free_capture = find_safe_free_capture(
+        # Before normal fuzzy selection, prefer safe captures so "human-like"
+        # does not become "wander around while a free piece is hanging".
+        priority_capture = find_priority_capture(
             board,
             candidates,
             best_cp
         )
 
-        if free_capture is not None:
+        if priority_capture is not None:
             return (
-                free_capture["move"],
-                free_capture["info"],
+                priority_capture["move"],
+                priority_capture["info"],
                 {
-                    "rank": free_capture["rank"],
+                    "rank": priority_capture["rank"],
                     "current_cp": best_cp,
-                    "selected_cp": free_capture["cp"],
-                    "source": "FREE_CAPTURE",
+                    "selected_cp": priority_capture["cp"],
+                    "source": "CAPTURE_PRIORITY",
                     "reason": (
-                        "FREE PIECE CAPTURE | "
-                        f"TARGET={chess.square_name(free_capture['move'].to_square)} "
-                        f"RANK=#{free_capture['rank'] + 1}"
+                        f"{priority_capture['reason_tag']} | "
+                        f"TARGET={chess.square_name(priority_capture['move'].to_square)} "
+                        f"VICTIM={priority_capture['victim_value']/100:.1f} "
+                        f"{'FREE' if priority_capture['free'] else 'LIQUIDATION'}"
                     )
                 }
             )
