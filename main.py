@@ -7388,10 +7388,13 @@ def verify_bot_move(
     board_coords,
     black_perspective
 ):
-    """Fast closed-loop bot verification.
+    """Strict closed-loop bot verification.
 
-    Uses one cheap whole-board motion map plus exact classification only on
-    affected squares. Internal board is not advanced until this succeeds.
+    A fast motion/state check is used first for speed, but EVERY bot move
+    must then pass the complete 64-square expected-board confirmation before
+    python-chess is allowed to commit it. There is intentionally no
+    fast-only commit path: a false bot confirmation would advance the
+    internal board and poison the baseline used by human-move detection.
     """
     start = time.perf_counter()
     deadline = start + BOT_VERIFY_TIMEOUT
@@ -7405,6 +7408,7 @@ def verify_bot_move(
             continue
 
         last_frame = after_frame
+
         ok, reason = fast_expected_post_state_confirmed(
             before_frame,
             after_frame,
@@ -7413,48 +7417,52 @@ def verify_bot_move(
             board_coords,
             black_perspective
         )
-        if ok:
-            # Normal moves use the fast closed-loop screen validation. Because
-            # before_frame is a previously verified complete board, the 64-square
-            # motion map proves that no unrelated square changed, and exact
-            # source/destination classification proves the requested piece moved.
-            # Captures/castling/promotion still get the strict full-board check.
-            strict_full = (
-                board.is_capture(move)
-                or board.is_castling(move)
-                or move.promotion is not None
-            )
 
-            if not strict_full:
-                return True, after_frame, reason
-
-            expected_after = expected_board_after_move(
-                board,
-                move
-            )
-            full_ok, full_reason = full_board_state_confirmed(
-                after_frame,
-                expected_after,
-                board_coords,
-                black_perspective
-            )
-
-            if full_ok:
-                return True, after_frame, (
-                    "scrcpy full-board match 64/64; "
-                    + reason
-                )
-
-            last_reason = (
-                "fast post-state passed but scrcpy full-board rejected: "
-                + full_reason
-            )
-        else:
+        if not ok:
             last_reason = reason
+            time.sleep(BOT_RECOVERY_POLL)
+            continue
+
+        # FINAL AUTHORITY:
+        # Every move, including ordinary quiet moves, must match the complete
+        # expected python-chess position on the physical board before the
+        # caller is permitted to board.push(move).
+        expected_after = expected_board_after_move(
+            board,
+            move
+        )
+
+        full_ok, full_reason = full_board_state_confirmed(
+            after_frame,
+            expected_after,
+            board_coords,
+            black_perspective
+        )
+
+        if full_ok:
+            return True, after_frame, (
+                "scrcpy full-board match 64/64; "
+                + reason
+            )
+
+        last_reason = (
+            "fast post-state passed but scrcpy full-board rejected: "
+            + full_reason
+        )
+
+        progress(
+            "VALIDATION",
+            (
+                f"BOT WAITING | fast PASS but full-board FAIL | "
+                f"{move.uci()} | {full_reason}"
+            ),
+            key="bot_full_verify_wait",
+            force=True
+        )
+
         time.sleep(BOT_RECOVERY_POLL)
 
     return False, last_frame, last_reason
-
 
 def detect_board_orientation(
 
