@@ -12311,59 +12311,10 @@ def main():
                                     ):
                                         retry_count += 1
 
-                                        # EXTRA 2-second whole-board catch-up while a
-                                        # frozen Stockfish move is being retried. This
-                                        # specifically handles: bot move already on
-                                        # screen + human reply already on screen.
-                                        now_rescan = time.perf_counter()
-                                        if now_rescan >= next_main_turn_rescan:
-                                            catchup = periodic_full_board_catchup_scan(
-                                                sct,
-                                                scrcpy_hwnd,
-                                                board,
-                                                cached_board_coords,
-                                                visual_black_perspective,
-                                                pending_bot_move=best_move,
-                                                first_frame=None,
-                                                legal_moves=list(board.legal_moves)
-                                            )
-                                            next_main_turn_rescan = (
-                                                now_rescan + TURN_RESCAN_INTERVAL
-                                            )
-
-                                            if (
-                                                catchup is not None
-                                                and catchup.get("bot_move") == best_move
-                                                and catchup.get("frame") is not None
-                                                and catchup.get("kind") in (
-                                                    "BOT_ONLY",
-                                                    "BOT_PLUS_HUMAN"
-                                                )
-                                            ):
-                                                recovery_frame = catchup["frame"]
-                                                recovered_human = catchup.get("human_move")
-
-                                                # The normal verified-Stockfish commit below
-                                                # will push only the pending bot move. If a
-                                                # human reply is already visible too, queue
-                                                # that verified move for the human branch so
-                                                # it is consumed immediately after the bot
-                                                # position is committed.
-                                                if recovered_human is not None:
-                                                    pending_recovered_human = (
-                                                        recovered_human,
-                                                        recovery_frame
-                                                    )
-                                                    print(
-                                                        "[RECOVERY] Found bot+human already "
-                                                        f"on screen: {best_san} + "
-                                                        f"{board.san(recovered_human) if recovered_human in expected_board_after_move(board, best_move).legal_moves else recovered_human.uci()}"
-                                                    )
-
-                                                verified = True
-                                                after_frame = recovery_frame
-                                                reason = catchup["reason"]
-                                                break
+                                        # Keep retry path fast: use the direct
+                                        # expected-post-state probe below. Full-board
+                                        # catchup remains available in the background
+                                        # recovery path, never blocking this move retry.
 
                                         retry_frame = capture_screen(
                                             sct,
