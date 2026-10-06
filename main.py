@@ -3617,63 +3617,6 @@ def select_promotion_piece(
             time.sleep(
                 SCAN_INTERVAL
             )
-                sct,
-                hwnd
-            )
-
-            if check_frame is None:
-                time.sleep(
-                    SCAN_INTERVAL
-                )
-                continue
-
-            # Confirm directly on the destination square that the exact
-            # promotion piece requested by Stockfish is now visible.
-            target_crop = get_square_crop(
-                check_frame,
-                board_coords,
-                move.to_square,
-                black_perspective
-            )
-
-            templates = get_scaled_templates(
-                board_coords[2] / 8.0,
-                board_coords[3] / 8.0
-            )
-
-            detected_piece, detected_score = classify_square(
-                target_crop,
-                templates,
-                expected_symbol=expected,
-                match_threshold=BOT_POST_MATCH_THRESHOLD
-            )
-
-            source_crop = get_square_crop(
-                check_frame,
-                board_coords,
-                move.from_square,
-                black_perspective
-            )
-
-            source_piece, _ = classify_square(
-                source_crop,
-                templates
-            )
-
-            if (
-                detected_piece == expected
-                and source_piece is None
-            ):
-                promotion_ok = True
-                promotion_reason = (
-                    f"source=empty destination={expected} "
-                    f"({detected_score:.3f})"
-                )
-                break
-
-            time.sleep(
-                SCAN_INTERVAL
-            )
 
         if promotion_ok:
             time.sleep(
