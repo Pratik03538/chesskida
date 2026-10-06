@@ -154,8 +154,8 @@ BOT_MATE_DELAY_MAX = 2.00
 # endgame territory.
 BOT_EVERY_MOVE_DELAY_MIN = 0.000
 BOT_EVERY_MOVE_DELAY_MAX = 0.010
-BOT_THINK_PAUSE_MIN = 0.50
-BOT_THINK_PAUSE_MAX = 1.50
+BOT_THINK_PAUSE_MIN = 0.25
+BOT_THINK_PAUSE_MAX = 0.75
 BOT_THINK_PAUSE_FIRST_MOVE = 15
 BOT_THINK_PAUSE_LAST_MOVE = 40
 BOT_THINK_PAUSE_CANDIDATES_MIN = 2
@@ -12053,49 +12053,30 @@ def main():
                                 pending_recovery = None
 
                                 if pending_entry is not None:
-                                    pending_recovery = periodic_full_board_catchup_scan(
+                                    pending_frame = capture_screen(
                                         sct,
-                                        scrcpy_hwnd,
-                                        board,
-                                        cached_board_coords,
-                                        visual_black_perspective,
-                                        pending_bot_move=best_move,
-                                        first_frame=None,
-                                        legal_moves=list(board.legal_moves)
+                                        scrcpy_hwnd
                                     )
 
-                                    if (
-                                        pending_recovery is not None
-                                        and pending_recovery.get("bot_move") == best_move
-                                        and pending_recovery.get("frame") is not None
-                                        and pending_recovery.get("kind") in (
-                                            "BOT_ONLY",
-                                            "BOT_PLUS_HUMAN"
-                                        )                                    ):
-                                        recovery_frame = pending_recovery["frame"]
-                                        recovered_human = pending_recovery.get("human_move")
+                                    pending_post_ok, pending_post_reason = (
+                                        screen_matches_expected_bot_move(
+                                            pending_frame,
+                                            board,
+                                            best_move,
+                                            cached_board_coords,
+                                            visual_black_perspective,
+                                            baseline_frame
+                                        )
+                                    )
 
-                                        if recovered_human is not None:
-                                            pending_recovered_human = (
-                                                recovered_human,
-                                                recovery_frame
-                                            )
-                                            print(
-                                                "[RECOVERY] Pending Stockfish move + human reply "
-                                                "already on screen: "
-                                                f"{best_san} + "
-                                                f"{chess.square_name(recovered_human.from_square)}"
-                                                f"{chess.square_name(recovered_human.to_square)}"
-                                            )
-                                        else:
-                                            print(
-                                                "[RECOVERY] Pending Stockfish move already on screen: "
-                                                f"{best_san} | no additional click"
-                                            )
-
+                                    if pending_post_ok:
+                                        print(
+                                            "[RECOVERY] Pending Stockfish move already on screen: "
+                                            f"{best_san} | fast post-state confirmation"
+                                        )
                                         verified = True
-                                        after_frame = recovery_frame
-                                        reason = pending_recovery["reason"]
+                                        after_frame = pending_frame
+                                        reason = pending_post_reason
 
                                 before_frame = capture_screen(
                                     sct,
@@ -12250,59 +12231,14 @@ def main():
                                             f"{best_move.uci()} | committing only after physical confirmation"
                                         )
                                     else:
-                                        # The source mismatch can mean the Stockfish move
-                                        # is already settled on screen. Re-check the complete
-                                        # board before declaring the pending move blocked.
-                                        late_recovery = periodic_full_board_catchup_scan(
-                                            sct,
-                                            scrcpy_hwnd,
-                                            board,
-                                            cached_board_coords,
-                                            visual_black_perspective,
-                                            pending_bot_move=best_move,
-                                            first_frame=before_frame,
-                                            legal_moves=list(board.legal_moves)
+                                        last_bot_position_key = position_key
+                                        print(
+                                            "[VALIDATION] WAITING | pending Stockfish move "
+                                            "not yet physically confirmed; no click and no board.push() | "
+                                            f"{pre_reason}"
                                         )
-
-                                        if (
-                                            late_recovery is not None
-                                            and late_recovery.get("bot_move") == best_move
-                                            and late_recovery.get("frame") is not None
-                                            and late_recovery.get("kind") in (
-                                                "BOT_ONLY",
-                                                "BOT_PLUS_HUMAN"
-                                            )
-                                        ):
-                                            recovery_frame = late_recovery["frame"]
-                                            recovered_human = late_recovery.get("human_move")
-
-                                            if recovered_human is not None:
-                                                pending_recovered_human = (
-                                                    recovered_human,
-                                                    recovery_frame
-                                                )
-
-                                            verified = True
-                                            after_frame = recovery_frame
-                                            reason = late_recovery["reason"]
-                                            print(
-                                                "[RECOVERY] Pending move recovered from full-board state: "
-                                                f"{best_san}"
-                                                + (
-                                                    " + human reply already present"
-                                                    if recovered_human is not None
-                                                    else ""
-                                                )
-                                            )
-                                        else:
-                                            last_bot_position_key = position_key
-                                            print(
-                                                "[VALIDATION] WAITING | pending Stockfish move "
-                                                "not yet physically confirmed; no click and no board.push() | "
-                                                f"{pre_reason}"
-                                            )
-                                            time.sleep(BOT_RECOVERY_POLL)
-                                            continue
+                                        time.sleep(BOT_RECOVERY_POLL)
+                                        continue
 
                                 if not verified:
                                     print(
