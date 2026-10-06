@@ -60,7 +60,7 @@ BOT_SOURCE_SELECT_DOMINANCE_RATIO = 0.80
 BOT_SOURCE_SELECT_STABLE_SAMPLES = 1
 
 PROMOTION_WAIT = 0.050
-PROMOTION_RETRIES = 5
+PROMOTION_RETRIES = 2
 SCAN_INTERVAL = 0.006
 ORIENTATION_TIMEOUT = 1.2
 HUMAN_MOVE_TIMEOUT = 0.35
@@ -8304,6 +8304,94 @@ def find_free_mate_cleanup_capture(board, candidates):
     return selected
 
 
+def find_priority_queen_promotion(
+    board,
+    candidates,
+    best_cp
+):
+    """Prefer a safe QUEEN promotion whenever promotion is available.
+
+    Queen promotion is the default conversion choice. Underpromotion is left
+    to the engine only when no legal queen promotion exists or the queen move
+    is clearly unsafe and a better engine-backed promotion is available.
+    """
+    candidate_map = {
+        candidate["move"]: candidate
+        for candidate in candidates
+    }
+
+    queen_promotions = [
+        move
+        for move in board.legal_moves
+        if move.promotion == chess.QUEEN
+    ]
+
+    if not queen_promotions:
+        return None
+
+    choices = []
+
+    for move in queen_promotions:
+        candidate = candidate_map.get(move)
+
+        try:
+            after = board.copy(stack=False)
+            after.push(move)
+        except Exception:
+            continue
+
+        if after.is_checkmate():
+            return {
+                "move": move,
+                "info": candidate["info"] if candidate else None,
+                "rank": candidate["rank"] if candidate else 0,
+                "cp": candidate["cp"] if candidate else best_cp,
+                "reason_tag": "QUEEN PROMOTION MATE"
+            }
+
+        # Never force a queen promotion when the newly promoted queen can be
+        # immediately captured and the engine did not consider the move.
+        if candidate is None:
+            immediate_queen_loss = any(
+                reply.to_square == move.to_square
+                for reply in after.legal_moves
+            )
+            if immediate_queen_loss:
+                continue
+
+        candidate_cp = (
+            int(candidate["cp"])
+            if candidate is not None
+            else best_cp
+        )
+
+        if candidate is not None and candidate_cp < best_cp - FREE_CAPTURE_MAX_CP_DROP:
+            continue
+
+        choices.append(
+            {
+                "move": move,
+                "info": candidate["info"] if candidate else None,
+                "rank": candidate["rank"] if candidate else 0,
+                "cp": candidate_cp,
+                "reason_tag": "QUEEN PROMOTION"
+            }
+        )
+
+    if not choices:
+        return None
+
+    choices.sort(
+        key=lambda item: (
+            item["cp"],
+            -item["rank"]
+        ),
+        reverse=True
+    )
+
+    return choices[0]
+
+
 def find_priority_capture(
     board,
     candidates,
@@ -9094,6 +9182,31 @@ def choose_stockfish_move(
         )
 
     if best_cp > MIN_POSITIVE_CP:
+        # Convert an extra pawn when a queen promotion is genuinely
+        # available. Promotion is a stronger conversion priority than
+        # wandering/shuffling in a winning position.
+        priority_promotion = find_priority_queen_promotion(
+            board,
+            candidates,
+            best_cp
+        )
+
+        if priority_promotion is not None:
+            return (
+                priority_promotion["move"],
+                priority_promotion["info"],
+                {
+                    "rank": priority_promotion["rank"],
+                    "current_cp": best_cp,
+                    "selected_cp": priority_promotion["cp"],
+                    "source": "QUEEN_PROMOTION",
+                    "reason": (
+                        f"{priority_promotion['reason_tag']} | "
+                        f"TARGET={chess.square_name(priority_promotion['move'].to_square)}"
+                    )
+                }
+            )
+
         # Before normal fuzzy selection, prefer safe captures so "human-like"
         # does not become "wander around while a free piece is hanging".
         priority_capture = find_priority_capture(
