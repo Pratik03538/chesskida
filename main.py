@@ -152,6 +152,8 @@ BOT_MATE_DELAY_MAX = 2.00
 # is randomized again, so the pause never lands on a fixed move number.
 # Long thinking pauses stop after move 40 because the game is usually entering
 # endgame territory.
+BOT_EVERY_MOVE_DELAY_MIN = 0.00
+BOT_EVERY_MOVE_DELAY_MAX = 0.10
 BOT_THINK_PAUSE_AFTER_MIN_MOVES = 10
 BOT_THINK_PAUSE_AFTER_MAX_MOVES = 15
 BOT_THINK_PAUSE_MIN = 1.00
@@ -7936,12 +7938,12 @@ def natural_bot_move_delay(
     selection_meta=None,
     moves_since_buffer=0
 ):
-    """Return an occasional midgame human-like thinking pause.
+    """Return a small random delay on every move plus rare long midgame pauses.
 
-    Most bot moves are immediate. A long pause is scheduled at a randomized
-    10-15 bot-move interval, then the next interval is randomized again.
-    No long thinking pause is scheduled after bot move 40. Tactical moves
-    remain instant, and pending retries never call this function again.
+    Every first-attempt bot move gets a random 0-0.1s base delay. A separate
+    randomized 10-15 move scheduler occasionally adds a 1-5s thinking pause
+    during the first 40 bot moves. After move 40, only the small base delay
+    remains. Pending retries never call this function.
     """
     global _last_bot_natural_delay
     global _bot_timing_move_count
@@ -7961,35 +7963,23 @@ def natural_bot_move_delay(
     # function, so a retry cannot consume another timing slot.
     _bot_timing_move_count += 1
 
-    # Tactical moves are reactive and should never receive an artificial
-    # thinking pause.
-    try:
-        tactical = (
-            board.gives_check(move)
-            or board.is_capture(move)
-            or move.promotion is not None
-            or board.is_castling(move)
-        )
-    except Exception:
-        tactical = False
+    # Every move gets a tiny random base delay.
+    base_delay = random.uniform(
+        BOT_EVERY_MOVE_DELAY_MIN,
+        BOT_EVERY_MOVE_DELAY_MAX
+    )
 
-    if tactical:
-        _last_bot_natural_delay = 0.0
-        return 0.0
-
-    # Primary human-like pause scheduler: the trigger distance is randomized
-    # after every pause, so there is no fixed "every N moves" cadence.
+    # After move 40, no long thinking pause is added because the game is
+    # typically moving into endgame and should stay fast.
     if (
         _next_bot_think_pause_at is not None
-        and _bot_timing_move_count >= _next_bot_think_pause_at
         and _bot_timing_move_count <= BOT_THINK_PAUSE_LAST_MOVE
+        and _bot_timing_move_count >= _next_bot_think_pause_at
     ):
-        delay = random.uniform(
+        think_delay = random.uniform(
             BOT_THINK_PAUSE_MIN,
             BOT_THINK_PAUSE_MAX
         )
-
-        _last_bot_natural_delay = delay
 
         next_gap = random.randint(
             BOT_THINK_PAUSE_AFTER_MIN_MOVES,
@@ -8000,11 +7990,27 @@ def natural_bot_move_delay(
             + next_gap
         )
 
-        return max(0.0, float(delay))
+        delay = base_delay + think_delay
+    else:
+        delay = base_delay
 
-    # After move 40, return immediately so endgame play stays fast.
-    _last_bot_natural_delay = 0.0
-    return 0.0
+    # Avoid consecutive nearly identical base delays without imposing a
+    # fixed cadence. This changes only the tiny 0-0.1s component.
+    if (
+        _last_bot_natural_delay is not None
+        and abs(base_delay - _last_bot_natural_delay) < BOT_DELAY_REPEAT_GAP
+    ):
+        retry = random.uniform(
+            BOT_DELAY_REPEAT_GAP,
+            BOT_DELAY_REPEAT_GAP * 1.5
+        )
+        delay += min(
+            retry,
+            BOT_EVERY_MOVE_DELAY_MAX - base_delay
+        )
+
+    _last_bot_natural_delay = base_delay
+    return max(0.0, float(delay))
 
 
 def build_analysis(
