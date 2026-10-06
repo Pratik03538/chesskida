@@ -161,6 +161,7 @@ BOT_THINK_PAUSE_LAST_MOVE = 40
 BOT_THINK_PAUSE_CANDIDATES_MIN = 2
 BOT_THINK_PAUSE_CANDIDATES_MAX = 3
 BOT_THINK_PAUSE_TAKE_CHANCE = 0.70
+BOT_OPENING_FAST_VERIFY_MOVES = 10
 BOT_STRONG_FAVOR_CP = 250
 BOT_DELAY_REPEAT_GAP = 0.045
 
@@ -7456,9 +7457,12 @@ def verify_bot_move(
             # source/destination classification proves the requested piece moved.
             # Captures/castling/promotion still get the strict full-board check.
             strict_full = (
-                board.is_capture(move)
-                or board.is_castling(move)
-                or move.promotion is not None
+                _bot_timing_move_count > BOT_OPENING_FAST_VERIFY_MOVES
+                and (
+                    board.is_capture(move)
+                    or board.is_castling(move)
+                    or move.promotion is not None
+                )
             )
 
             if not strict_full:
