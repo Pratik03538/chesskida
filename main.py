@@ -6930,6 +6930,19 @@ def fast_expected_post_state_confirmed(
                 f"{source_change:.4f}"
             )
 
+        # Safety gate: motion at the source is not enough to prove the piece
+        # actually left. The source square must now classify as empty.
+        source_empty_ok, source_detected, source_score = expected_piece_at(
+            after_frame,
+            move.from_square,
+            None
+        )
+        if not source_empty_ok:
+            return False, (
+                f"source still occupied "
+                f"({source_detected or '-'}:{source_score:.3f})"
+            )
+
     if board.is_castling(move):
         rook_to = (
             chess.F1 if board.turn == chess.WHITE and board.is_kingside_castling(move) else
@@ -7284,29 +7297,10 @@ def screen_matches_expected_bot_move(
     if not fast_ok:
         return False, fast_reason
 
-    # Pending/recovery confirmation must use the same strict final authority
-    # as the normal bot path. Never commit a move from a loose two-square
-    # match, especially when Bxg5 could physically become Qxg5.
-    expected_after = expected_board_after_move(
-        board,
-        move
-    )
-    full_ok, full_reason = full_board_state_confirmed(
-        frame,
-        expected_after,
-        board_coords,
-        black_perspective
-    )
-    if not full_ok:
-        return False, (
-            "fast post-state passed but scrcpy full-board rejected: "
-            + full_reason
-        )
-
-    return True, (
-        "scrcpy full-board match 64/64; "
-        + fast_reason
-    )
+    # Recovery must stay on the fast closed-loop path. The fast verifier
+    # already checks that only allowed squares moved, the destination contains
+    # the exact expected piece, and the source is now empty.
+    return True, fast_reason
 
 
 def transition_confirmed(
