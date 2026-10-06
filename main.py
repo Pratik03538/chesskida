@@ -60,7 +60,9 @@ BOT_SOURCE_SELECT_DOMINANCE_RATIO = 0.80
 BOT_SOURCE_SELECT_STABLE_SAMPLES = 1
 
 PROMOTION_WAIT = 0.050
-PROMOTION_RETRIES = 2
+PROMOTION_RETRIES = 3
+PROMOTION_CONFIRM_TIMEOUT = 0.35
+PROMOTION_CONFIRM_FRAMES = 2
 SCAN_INTERVAL = 0.006
 ORIENTATION_TIMEOUT = 1.2
 HUMAN_MOVE_TIMEOUT = 0.35
@@ -3250,7 +3252,8 @@ def find_promotion_choice(
     promotion_color,
     board_coords,
     black_perspective,
-    allow_fallback=True
+    allow_fallback=True,
+    before_board=None
 ):
     expected = promotion_symbol(
         move,
@@ -3376,6 +3379,60 @@ def select_promotion_piece(
         1,
         PROMOTION_RETRIES + 1
     ):
+        # IMPORTANT: a previous promotion click may already have succeeded even
+        # when the first confirmation window missed the settled frame. Before
+        # clicking again, check whether the exact final position is already on
+        # screen. Never treat a click itself as confirmation.
+        settled_frame = capture_screen(
+            sct,
+            hwnd
+        )
+
+        if settled_frame is not None:
+            target_crop = get_square_crop(
+                settled_frame,
+                board_coords,
+                move.to_square,
+                black_perspective
+            )
+            source_crop = get_square_crop(
+                settled_frame,
+                board_coords,
+                move.from_square,
+                black_perspective
+            )
+
+            templates = get_scaled_templates(
+                board_coords[2] / 8.0,
+                board_coords[3] / 8.0
+            )
+
+            settled_target, settled_score = classify_square(
+                target_crop,
+                templates,
+                expected_symbol=expected,
+                match_threshold=BOT_POST_MATCH_THRESHOLD
+            )
+            settled_source, _ = classify_square(
+                source_crop,
+                templates
+            )
+
+            if (
+                settled_target == expected
+                and settled_source is None
+            ):
+                progress(
+                    "PROMOTION",
+                    (
+                        f"already confirmed on board: "
+                        f"{piece_name} ({settled_score:.3f})"
+                    ),
+                    key="promotion_stage",
+                    force=True
+                )
+                return True
+
         time.sleep(
             PROMOTION_WAIT
         )
@@ -3418,19 +3475,124 @@ def select_promotion_piece(
         if not focus_scrcpy(hwnd):
             continue
 
-        left_click_screen(
+        click_sent = left_click_screen(
             px,
             py
         )
 
-        # Confirm that the exact promotion piece requested by Stockfish is
-        # already on the destination square before accepting the promotion.
+        if not click_sent:
+            progress(
+                "PROMOTION",
+                (
+                    f"{piece_name} input dispatch failed; "
+                    f"attempt {attempt}/{PROMOTION_RETRIES}"
+                ),
+                key="promotion_loop",
+                force=True
+            )
+            continue
+
+        # A successful input dispatch is NOT a successful promotion.
+        # Confirmation requires the exact promoted piece on the destination,
+        # the source square to be empty, and the complete expected board state.
         promotion_ok = False
         promotion_reason = "promotion state not yet confirmed"
-        promotion_deadline = time.perf_counter() + 0.10
+        promotion_streak = 0
+        promotion_deadline = (
+            time.perf_counter()
+            + PROMOTION_CONFIRM_TIMEOUT
+        )
 
         while time.perf_counter() < promotion_deadline:
             check_frame = capture_screen(
+                sct,
+                hwnd
+            )
+
+            if check_frame is None:
+                time.sleep(
+                    SCAN_INTERVAL
+                )
+                continue
+
+            target_crop = get_square_crop(
+                check_frame,
+                board_coords,
+                move.to_square,
+                black_perspective
+            )
+
+            templates = get_scaled_templates(
+                board_coords[2] / 8.0,
+                board_coords[3] / 8.0
+            )
+
+            detected_piece, detected_score = classify_square(
+                target_crop,
+                templates,
+                expected_symbol=expected,
+                match_threshold=BOT_POST_MATCH_THRESHOLD
+            )
+
+            source_crop = get_square_crop(
+                check_frame,
+                board_coords,
+                move.from_square,
+                black_perspective
+            )
+
+            source_piece, _ = classify_square(
+                source_crop,
+                templates
+            )
+
+            exact_transition_ok = (
+                detected_piece == expected
+                and source_piece is None
+            )
+
+            full_ok = False
+            full_reason = "not yet full-board confirmed"
+
+            if exact_transition_ok:
+                # Final authority: complete physical board must match the
+                # expected post-promotion position.
+                full_ok, full_reason = full_board_state_confirmed(
+                    check_frame,
+                    expected_board_after_move(
+                        before_board_for_promotion,
+                        move
+                    ),
+                    board_coords,
+                    black_perspective
+                )
+
+            if exact_transition_ok and full_ok:
+                promotion_streak += 1
+                promotion_reason = (
+                    f"source=empty destination={expected} "
+                    f"({detected_score:.3f}); {full_reason}"
+                )
+
+                if promotion_streak >= PROMOTION_CONFIRM_FRAMES:
+                    promotion_ok = True
+                    break
+            else:
+                promotion_streak = 0
+                if exact_transition_ok:
+                    promotion_reason = (
+                        f"piece visible but full-board not confirmed: "
+                        f"{full_reason}"
+                    )
+                else:
+                    promotion_reason = (
+                        f"destination/source not confirmed "
+                        f"({detected_piece or '-'}:{detected_score:.3f})"
+                    )
+
+            time.sleep(
+                SCAN_INTERVAL
+            )
                 sct,
                 hwnd
             )
@@ -3637,7 +3799,8 @@ def click_move(
     scrcpy_hwnd,
     sct=None,
     promotion_color=None,
-    before_frame=None
+    before_frame=None,
+    before_board=None
 ):
     if not focus_scrcpy(scrcpy_hwnd):
         print(
@@ -3751,7 +3914,8 @@ def click_move(
             move,
             promotion_color,
             board_coords,
-            black_perspective
+            black_perspective,
+            before_board=before_board
         )
 
     return True
