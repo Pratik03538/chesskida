@@ -156,8 +156,8 @@ BOT_EVERY_MOVE_DELAY_MIN = 0.00
 BOT_EVERY_MOVE_DELAY_MAX = 0.10
 BOT_THINK_PAUSE_AFTER_MIN_MOVES = 10
 BOT_THINK_PAUSE_AFTER_MAX_MOVES = 15
-BOT_THINK_PAUSE_MIN = 1.00
-BOT_THINK_PAUSE_MAX = 5.00
+BOT_THINK_PAUSE_MIN = 0.50
+BOT_THINK_PAUSE_MAX = 1.50
 BOT_THINK_PAUSE_LAST_MOVE = 40
 BOT_STRONG_FAVOR_CP = 250
 BOT_DELAY_REPEAT_GAP = 0.045
@@ -7994,21 +7994,8 @@ def natural_bot_move_delay(
     else:
         delay = base_delay
 
-    # Avoid consecutive nearly identical base delays without imposing a
-    # fixed cadence. This changes only the tiny 0-0.1s component.
-    if (
-        _last_bot_natural_delay is not None
-        and abs(base_delay - _last_bot_natural_delay) < BOT_DELAY_REPEAT_GAP
-    ):
-        retry = random.uniform(
-            BOT_DELAY_REPEAT_GAP,
-            BOT_DELAY_REPEAT_GAP * 1.5
-        )
-        delay += min(
-            retry,
-            BOT_EVERY_MOVE_DELAY_MAX - base_delay
-        )
-
+    # Keep the per-move component truly random in the requested 0-0.1s range.
+    # Do not push it toward 0.1s just to avoid repeated values.
     _last_bot_natural_delay = base_delay
     return max(0.0, float(delay))
 
