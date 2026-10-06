@@ -3348,7 +3348,8 @@ def select_promotion_piece(
     promotion_color,
     board_coords,
     black_perspective,
-    allow_fallback=True
+    allow_fallback=True,
+    before_board=None
 ):
     if move.promotion is None:
         return True
@@ -3418,15 +3419,34 @@ def select_promotion_piece(
                 templates
             )
 
-            if (
+            settled_exact = (
                 settled_target == expected
                 and settled_source is None
-            ):
+            )
+
+            settled_full = False
+            settled_full_reason = "full-board reference unavailable"
+
+            if settled_exact and before_board is not None:
+                settled_full, settled_full_reason = (
+                    full_board_state_confirmed(
+                        settled_frame,
+                        expected_board_after_move(
+                            before_board,
+                            move
+                        ),
+                        board_coords,
+                        black_perspective
+                    )
+                )
+
+            if settled_exact and settled_full:
                 progress(
                     "PROMOTION",
                     (
                         f"already confirmed on board: "
-                        f"{piece_name} ({settled_score:.3f})"
+                        f"{piece_name} ({settled_score:.3f}); "
+                        f"{settled_full_reason}"
                     ),
                     key="promotion_stage",
                     force=True
@@ -3554,20 +3574,24 @@ def select_promotion_piece(
             full_ok = False
             full_reason = "not yet full-board confirmed"
 
-            if exact_transition_ok:
+            if exact_transition_ok and before_board is not None:
                 # Final authority: complete physical board must match the
                 # expected post-promotion position.
                 full_ok, full_reason = full_board_state_confirmed(
                     check_frame,
                     expected_board_after_move(
-                        before_board_for_promotion,
+                        before_board,
                         move
                     ),
                     board_coords,
                     black_perspective
                 )
 
-            if exact_transition_ok and full_ok:
+            if (
+                exact_transition_ok
+                and before_board is not None
+                and full_ok
+            ):
                 promotion_streak += 1
                 promotion_reason = (
                     f"source=empty destination={expected} "
@@ -12178,7 +12202,8 @@ def main():
                                         board.turn,
                                         cached_board_coords,
                                         visual_black_perspective,
-                                        allow_fallback=False
+                                        allow_fallback=False,
+                                        before_board=board
                                     )
 
                                     if promotion_recovered:
@@ -12382,7 +12407,8 @@ def main():
                                         scrcpy_hwnd,
                                         sct=sct,
                                         promotion_color=board.turn,
-                                        before_frame=before_frame
+                                        before_frame=before_frame,
+                                        before_board=board
                                     )
 
                                     if not clicked:
@@ -12532,7 +12558,8 @@ def main():
                                             scrcpy_hwnd,
                                             sct=sct,
                                             promotion_color=board.turn,
-                                            before_frame=retry_frame
+                                            before_frame=retry_frame,
+                                            before_board=board
                                         )
 
                                         if not clicked_retry:
