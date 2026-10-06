@@ -2180,16 +2180,25 @@ HUMAN_ADVANTAGE_GROWTH_STEP_MIN_CP = 20
 HUMAN_ADVANTAGE_GROWTH_STEP_MAX_CP = 45
 HUMAN_ADVANTAGE_GROWTH_TRIGGER_CP = 15
 
-# Once a forced mate is already very close, do not humanize it away.
-MATE_FORCE_FAST_MAX = 4
+# Winning-position guard:
+# Human-like selection is allowed, but once there is a real advantage it must
+# not throw away a large part of the advantage or voluntarily hang a major piece.
+HUMAN_WINNING_GUARD_START_CP = 60
+HUMAN_WINNING_GUARD_MAX_DROP_CP = 45
+HUMAN_WINNING_GUARD_RANK_CAP = 5
+HUMAN_STRONG_WINNING_CP = 300
+HUMAN_STRONG_WINNING_RANK_CAP = 3
+HUMAN_WINNING_NON_BEST_CHANCE = 0.45
+HUMAN_STRONG_WINNING_NON_BEST_CHANCE = 0.25
+FREE_CAPTURE_MIN_VALUE = 3
+FREE_CAPTURE_MAX_CP_DROP = 100
 
-# Human-like mate handling is active in the existing M5-M15 window.
-# There is no fixed +5 cap anymore. Instead, when the engine finds a faster
-# mate (for example M10 -> M9 -> M8), the bot sustains the current mate level
-# for a few actual moves and then improves by only one mate step at a time.
-# This keeps the winning plan stable instead of chasing every immediate mate
-# improvement.
-MATE_GRACE_MIN = 5
+# Once a forced mate reaches M5, stop humanizing it away and finish quickly.
+MATE_FORCE_FAST_MAX = 5
+
+# Human-like mate handling remains active for M6-M15. M5 and below are
+# considered a real finishing opportunity and use the fastest mate.
+MATE_GRACE_MIN = 6
 MATE_GRACE_MAX = 15
 MATE_SUSTAIN_MIN_MOVES = 2
 MATE_SUSTAIN_MAX_MOVES = 3
@@ -8295,6 +8304,145 @@ def find_free_mate_cleanup_capture(board, candidates):
     return selected
 
 
+def find_safe_free_capture(
+    board,
+    candidates,
+    best_cp
+):
+    """Find a genuinely free major/minor piece to capture.
+
+    A capture is "free" here only when the captured piece is worth at least a
+    minor piece and the capturing piece cannot be immediately taken back.
+    The candidate must still be reasonably close to the current best engine
+    score so a poisoned/tactical capture is not forced.
+    """
+    choices = []
+
+    for candidate in candidates:
+        move = candidate["move"]
+        victim_square = move.to_square
+
+        if board.is_en_passant(move):
+            victim_square = (
+                move.to_square - 8
+                if board.turn == chess.WHITE
+                else move.to_square + 8
+            )
+
+        victim = board.piece_at(victim_square)
+
+        if victim is None or victim.color == board.turn:
+            continue
+
+        victim_value = material_value(victim.piece_type)
+        if victim_value < FREE_CAPTURE_MIN_VALUE * 100:
+            continue
+
+        try:
+            after = board.copy(stack=False)
+            after.push(move)
+        except Exception:
+            continue
+
+        # No legal reply may capture the moved piece. That is the key
+        # distinction between a genuinely free piece and an ordinary exchange.
+        immediate_take = any(
+            reply.to_square == move.to_square
+            for reply in after.legal_moves
+        )
+
+        if immediate_take:
+            continue
+
+        candidate_cp = int(candidate.get("cp", best_cp))
+        if candidate_cp < best_cp - FREE_CAPTURE_MAX_CP_DROP:
+            continue
+
+        choices.append(
+            (
+                victim_value,
+                candidate_cp,
+                -int(candidate.get("rank", 99)),
+                candidate
+            )
+        )
+
+    if not choices:
+        return None
+
+    choices.sort(reverse=True, key=lambda item: item[:3])
+    return choices[0][3]
+
+
+def candidate_hangs_own_piece(
+    board,
+    move
+):
+    """Reject obvious one-move giveaways.
+
+    This is intentionally conservative: a check/mate or a materially winning
+    capture can still be a deliberate sacrifice. Otherwise a moved piece that
+    can be taken next move without a recapture is rejected when that sequence
+    loses material.
+    """
+    try:
+        if board.gives_check(move):
+            return False
+
+        before_victim = board.piece_at(move.to_square)
+        victim_value = (
+            material_value(before_victim.piece_type)
+            if before_victim is not None
+            and before_victim.color != board.turn
+            else 0
+        )
+
+        moved_piece = board.piece_at(move.from_square)
+        if moved_piece is None:
+            return True
+
+        moved_value = material_value(moved_piece.piece_type)
+
+        after = board.copy(stack=False)
+        after.push(move)
+
+        if after.is_checkmate():
+            return False
+
+        for reply in after.legal_moves:
+            if reply.to_square != move.to_square:
+                continue
+
+            reply_piece = after.piece_at(reply.from_square)
+            if reply_piece is None:
+                continue
+
+            after_reply = after.copy(stack=False)
+            after_reply.push(reply)
+
+            recaptured = any(
+                response.to_square == reply.to_square
+                for response in after_reply.legal_moves
+            )
+
+            if recaptured:
+                continue
+
+            # Net material swing after the opponent takes our moved piece.
+            # Negative means the move simply gave material away.
+            net = victim_value - moved_value
+
+            if net < 0 and moved_value >= 100:
+                return True
+
+        return False
+
+    except Exception:
+        # Safety-first fallback: unknown candidates are not rejected here;
+        # the existing engine score and physical verification remain in force.
+        return False
+
+
 def choose_stockfish_move(
     board,
     multipv_infos,
@@ -8483,8 +8631,9 @@ def choose_stockfish_move(
         # capturable, take it before closing the game. When only one
         # non-king piece remains, proceed with the normal mate plan.
         if (
-            best["mate"] <= MATE_GRACE_MAX
-            and best["mate"] > 0
+            MATE_GRACE_MIN
+            <= best["mate"]
+            <= MATE_GRACE_MAX
         ):
             cleanup = find_free_mate_cleanup_capture(
                 board,
@@ -8761,6 +8910,31 @@ def choose_stockfish_move(
         )
 
     if best_cp > MIN_POSITIVE_CP:
+        # Before normal fuzzy selection, take an actually free minor/major
+        # piece when the candidate is still reasonably close to #1.
+        free_capture = find_safe_free_capture(
+            board,
+            candidates,
+            best_cp
+        )
+
+        if free_capture is not None:
+            return (
+                free_capture["move"],
+                free_capture["info"],
+                {
+                    "rank": free_capture["rank"],
+                    "current_cp": best_cp,
+                    "selected_cp": free_capture["cp"],
+                    "source": "FREE_CAPTURE",
+                    "reason": (
+                        "FREE PIECE CAPTURE | "
+                        f"TARGET={chess.square_name(free_capture['move'].to_square)} "
+                        f"RANK=#{free_capture['rank'] + 1}"
+                    )
+                }
+            )
+
         normal_max_drop = safe_drop_fraction(
             best_cp
         )
@@ -8897,11 +9071,40 @@ def choose_stockfish_move(
         # normal/early play allow a small extra human-like evaluation band.
         selection_floor_cp = floor_cp
 
+        winning_guard = (
+            best_cp >= HUMAN_WINNING_GUARD_START_CP
+        )
+
         if not advantage_mode:
             selection_floor_cp = max(
                 5,
                 floor_cp - HUMAN_SELECTION_EXTRA_DROP_CP
             )
+
+        # Once ahead, keep human-like variation inside a tight evaluation
+        # band. The old 70cp extra drop could turn a winning position into
+        # equality for the sake of rank shuffling.
+        if winning_guard:
+            winning_drop_floor = max(
+                5,
+                best_cp - HUMAN_WINNING_GUARD_MAX_DROP_CP
+            )
+            selection_floor_cp = max(
+                selection_floor_cp,
+                winning_drop_floor
+            )
+
+        winning_rank_cap = (
+            HUMAN_STRONG_WINNING_RANK_CAP
+            if best_cp >= HUMAN_STRONG_WINNING_CP
+            else HUMAN_WINNING_GUARD_RANK_CAP
+        )
+
+        effective_rank_cap = (
+            min(adaptive_max_rank, winning_rank_cap)
+            if winning_guard
+            else adaptive_max_rank
+        )
 
         safe = [
             c
@@ -8909,9 +9112,19 @@ def choose_stockfish_move(
             if (
                 c["cp"] >= selection_floor_cp
                 and c["cp"] > 0
-                and c["rank"] <= adaptive_max_rank
+                and c["rank"] <= effective_rank_cap
+                and (
+                    not winning_guard
+                    or not candidate_hangs_own_piece(
+                        board,
+                        c["move"]
+                    )
+                )
             )
         ]
+
+        if not safe:
+            safe = [best]
 
         if not safe:
             safe = [best]
@@ -8922,9 +9135,17 @@ def choose_stockfish_move(
             if c["rank"] > 0
         ]
 
+        non_best_chance = (
+            HUMAN_STRONG_WINNING_NON_BEST_CHANCE
+            if best_cp >= HUMAN_STRONG_WINNING_CP
+            else HUMAN_WINNING_NON_BEST_CHANCE
+            if winning_guard
+            else HUMAN_SELECTION_NON_BEST_CHANCE
+        )
+
         if (
             len(non_best) >= 2
-            and random.random() < HUMAN_SELECTION_NON_BEST_CHANCE
+            and random.random() < non_best_chance
         ):
             pool = non_best
         else:
