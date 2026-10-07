@@ -8373,12 +8373,6 @@ def classify_move_quality(
     )
 
     return max(0.0, float(delay))
-x(0.0, _thinking_cooldown_until - now):.2f}s",
-        flush=True
-    )
-
-    return max(0.0, float(delay))
-
 def build_analysis(
     engine,
     before_board,
