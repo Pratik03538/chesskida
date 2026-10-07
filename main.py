@@ -151,6 +151,7 @@ BOT_MATE_DELAY_MAX = 2.00
 BOT_EVERY_MOVE_DELAY_MIN = 0.000
 BOT_EVERY_MOVE_DELAY_MAX = 0.010
 BOT_THINKING_ENABLED_DEFAULT = True
+BOT_THINKING_START_AFTER_MOVE = 10
 BOT_THINK_PAUSE_MIN = 2.0
 BOT_THINK_PAUSE_MAX = 5.0
 BOT_THINK_BUDGET_MIN = 10.0
@@ -1153,6 +1154,7 @@ def match_ui_draw(
         "thinking_toggle_rect",
         "rematch_toggle_rect",
         "new_match_toggle_rect",
+        "move_history_rect",
     ):
         match_ui[key] = None
 
@@ -1194,7 +1196,7 @@ def match_ui_draw(
                 and y1 >= 4
                 and x2 <= width - 4
                 and y2 <= height - 4
-                and not (
+                and (
                     x2 <= board_rect[0]
                     or x1 >= board_rect[2]
                     or y2 <= board_rect[1]
@@ -1614,6 +1616,9 @@ def draw_move_history_panel(
     board_coords,
     match_ui=None
 ):
+    if match_ui is not None:
+        match_ui["move_history_rect"] = None
+
     if board is None or board_coords is None:
         return
 
@@ -1649,12 +1654,33 @@ def draw_move_history_panel(
         else None
     )
 
-    candidates = [
+    candidates = []
+
+    # Prefer the dedicated right-side UI canvas when the match controls are there.
+    if (
+        controls_rect is not None
+        and controls_rect[0] >= bx + bw + 12
+    ):
+        candidates.extend([
+            (
+                controls_rect[0],
+                controls_rect[3] + 12
+            ),
+            (
+                controls_rect[0],
+                max(
+                    8,
+                    controls_rect[1] - panel_h - 12
+                )
+            ),
+        ])
+
+    candidates.extend([
         (bx - panel_w - 12, max(52, by)),
         (bx + bw + 12, max(52, by)),
         (max(8, bx), max(8, by - panel_h - 12)),
         (max(8, bx), min(height - panel_h - 8, by + bh + 12)),
-    ]
+    ])
 
     def overlaps(a, b):
         if b is None:
@@ -8176,6 +8202,11 @@ def natural_bot_move_delay(
     delay = base_delay
     _last_bot_natural_delay = base_delay
 
+    # Absolutely no 2-5 second thinking pause in the first 10 bot moves.
+    # The base 0-10ms interaction delay remains unchanged.
+    if _bot_timing_move_count <= BOT_THINKING_START_AFTER_MOVE:
+        return max(0.0, float(delay))
+
     if not thinking_enabled:
         return max(0.0, float(delay))
 
@@ -11290,7 +11321,36 @@ def main():
                     )
                     continue
 
+                # Keep the live capture untouched for detection/click verification.
+                # Add a dedicated right-side presentation area for all UI panels so
+                # evaluation data, buttons and move history never cover the board.
                 display_frame = frame.copy()
+
+                if cached_board_coords:
+                    ui_side_width = 600
+                    ui_gap = 12
+                    canvas_width = (
+                        frame.shape[1]
+                        + ui_gap
+                        + ui_side_width
+                    )
+
+                    ui_canvas = np.zeros(
+                        (
+                            frame.shape[0],
+                            canvas_width,
+                            frame.shape[2]
+                        ),
+                        dtype=frame.dtype
+                    )
+
+                    ui_canvas[
+                        :,
+                        :frame.shape[1]
+                    ] = frame
+
+                    display_frame = ui_canvas
+
                 if key == ord("m"):
                     if match_ui.get("phase") == "RESULT":
                         match_ui["requested_action"] = "REMATCH"
