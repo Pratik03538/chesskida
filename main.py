@@ -2208,6 +2208,12 @@ HUMAN_WINNING_NON_BEST_CHANCE = 0.45
 HUMAN_STRONG_WINNING_NON_BEST_CHANCE = 0.25
 FREE_CAPTURE_MIN_VALUE = 3
 FREE_CAPTURE_MAX_CP_DROP = 100
+# Extra safety for genuinely free captures:
+# after taking the piece, do not allow a line that gives up a major/minor
+# piece in the next 1-2 opponent moves or enters a forced mate M1-M5.
+FREE_CAPTURE_SAFETY_DEPTH = 10
+FREE_CAPTURE_SAFETY_MAX_CP_DROP = 250
+FREE_CAPTURE_SAFETY_MAX_PLY = 4
 
 # Once a forced mate reaches M5, stop humanizing it away and finish quickly.
 MATE_FORCE_FAST_MAX = 5
@@ -8622,11 +8628,128 @@ def free_capture_position_safe(
         return False
 
 
+def free_capture_engine_safe(
+    board,
+    move,
+    engine,
+    reference_cp
+):
+    """Second-stage safety check for a genuinely free capture.
+
+    Uses a shallow engine line after the capture to reject:
+    - forced mate against us in M1-M5;
+    - a large evaluation collapse;
+    - a major/minor own piece being lost in the first ~2 opponent moves
+      without an immediate recapture in the principal variation.
+
+    This is only applied to free-capture candidates, not ordinary engine
+    captures, so normal move selection stays fast.
+    """
+    if engine is None:
+        return True
+
+    try:
+        after = board.copy(stack=False)
+        after.push(move)
+
+        info = engine.analyse(
+            after,
+            chess.engine.Limit(
+                depth=FREE_CAPTURE_SAFETY_DEPTH
+            )
+        )
+
+        score_obj = info.get("score")
+        if score_obj is not None:
+            our_score = score_obj.pov(board.turn)
+            mate = our_score.mate()
+
+            # Never enter a forced mate M1-M5 after grabbing a "free" piece.
+            if (
+                mate is not None
+                and mate < 0
+                and abs(int(mate)) <= 5
+            ):
+                return False
+
+            cp = our_score.score(
+                mate_score=100000
+            )
+            if (
+                cp is not None
+                and reference_cp is not None
+                and cp < int(reference_cp) - FREE_CAPTURE_SAFETY_MAX_CP_DROP
+            ):
+                return False
+
+        # Tactical material safety over the first 1-2 opponent moves.
+        # Look only at the engine PV, keeping this check bounded and fast.
+        pv = info.get("pv", [])
+        probe = after
+
+        for ply_index, reply in enumerate(
+            pv[:FREE_CAPTURE_SAFETY_MAX_PLY]
+        ):
+            if reply not in probe.legal_moves:
+                break
+
+            mover = probe.turn
+            victim_square = reply.to_square
+
+            if probe.is_en_passant(reply):
+                victim_square = (
+                    reply.to_square - 8
+                    if mover == chess.WHITE
+                    else reply.to_square + 8
+                )
+
+            victim = probe.piece_at(victim_square)
+
+            if (
+                mover != board.turn
+                and victim is not None
+                and victim.color == board.turn
+                and victim.piece_type in {
+                    chess.KNIGHT,
+                    chess.BISHOP,
+                    chess.ROOK,
+                    chess.QUEEN,
+                }
+            ):
+                victim_value = material_value(
+                    victim.piece_type
+                )
+
+                after_opponent_capture = probe.copy(
+                    stack=False
+                )
+                after_opponent_capture.push(reply)
+
+                recaptured = any(
+                    response.to_square == reply.to_square
+                    for response in after_opponent_capture.legal_moves
+                )
+
+                if not recaptured and victim_value >= 300:
+                    return False
+
+            probe.push(reply)
+
+        return True
+
+    except Exception:
+        # Safety-first for this optional second-stage check: when the engine
+        # cannot evaluate the candidate reliably, do not elevate it as a safe
+        # free capture.
+        return False
+
+
 def find_priority_capture(
     board,
     candidates,
     best_cp,
-    force_endgame=False
+    force_endgame=False,
+    engine=None
 ):
     """Prefer safe captures before human-like wandering.
 
@@ -8713,8 +8836,8 @@ def find_priority_capture(
         ]
 
         # A truly free capture: no opponent piece can immediately take the
-        # capturing piece. Also require the resulting position to remain safe:
-        # no immediate mate-in-one and no free major/minor piece hanging next.
+        # capturing piece. The deeper engine safety pass is applied later
+        # after candidates are ranked, so normal move selection stays fast.
         free_capture = (
             not immediate_replies
             and free_capture_position_safe(board, move)
@@ -8798,6 +8921,35 @@ def find_priority_capture(
         reverse=True
     )
 
+    # Free pieces remain the highest capture priority, but only after
+    # the candidate survives the 1-2 move material / M1-M5 mate safety test.
+    free_choices = [
+        item
+        for item in choices
+        if item["free"]
+    ]
+
+    if free_choices and engine is not None:
+        free_choices.sort(
+            key=lambda item: (
+                item["victim_value"],
+                item["cp"],
+                -item["rank"]
+            ),
+            reverse=True
+        )
+
+        for free_choice in free_choices:
+            if free_capture_engine_safe(
+                board,
+                free_choice["move"],
+                engine,
+                best_cp
+            ):
+                return free_choice
+    elif free_choices:
+        return free_choices[0]
+
     selected = choices[0]
 
     if (
@@ -8805,6 +8957,23 @@ def find_priority_capture(
         or endgame
         or winning_material
     ):
+        # A free capture that failed the deeper safety check must not be
+        # re-selected as a fallback. Prefer the best ordinary capture instead.
+        if selected["free"] and engine is not None:
+            safe_alternatives = [
+                item
+                for item in choices
+                if not item["free"]
+            ]
+            if safe_alternatives:
+                return max(
+                    safe_alternatives,
+                    key=lambda item: (
+                        item["cp"],
+                        -item["rank"]
+                    )
+                )
+            return None
         return selected
 
     return None
@@ -8958,7 +9127,8 @@ def choose_stockfish_move(
     previous_eval_white_cp=None,
     opponent_accuracy=None,
     opponent_sample_count=0,
-    opponent_pressure=False
+    opponent_pressure=False,
+    engine=None
 ):
     # Reset the historical fuzzy state at a fresh match/new game.
     # This is retained from the fast-main-match-controls branch so a previous
@@ -9449,7 +9619,8 @@ def choose_stockfish_move(
         priority_capture = find_priority_capture(
             board,
             candidates,
-            best_cp
+            best_cp,
+            engine=engine
         )
 
         if priority_capture is not None:
@@ -12004,7 +12175,8 @@ def main():
                                             previous_eval_white_cp=selected_previous_eval,
                                             opponent_accuracy=opponent_accuracy,
                                             opponent_sample_count=opponent_sample_count,
-                                            opponent_pressure=opponent_pressure
+                                            opponent_pressure=opponent_pressure,
+                                            engine=engine
                                         )
 
                                         opponent_pressure = False
