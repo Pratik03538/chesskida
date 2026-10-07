@@ -8166,21 +8166,26 @@ def natural_bot_move_delay(
     thinking_enabled=BOT_THINKING_ENABLED_DEFAULT,
     previous_eval_white_cp=None
 ):
-    """Return the retained base delay plus a natural event-based pause.
+    """Return the retained base delay plus irregular human-like pauses.
 
-    The first 10 bot moves are always pause-free. After a real pause, a
-    random 8-12 BOT-MOVE refractory period is enforced. Once that period
-    expires, position complexity plus a randomized eligibility check decides
-    whether another pause happens. This prevents clustered pauses and avoids
-    a predictable "every N moves" rhythm.
-
-    Total pause time is capped by a random 10-15 second per-game budget.
+    Cadence rules:
+      * first 10 bot moves: no long pause
+      * after a real pause: only 5-8 moves are guaranteed pause-free
+      * after that, every move is reevaluated from the current position, so
+        another pause can happen around 5-8 moves sometimes, or 10-12 moves
+        later in other situations; there is no fixed N-move schedule
+      * after move 50: normal pauses stop
+      * after move 50, only one final pause is allowed when Stockfish has a
+        mate-in-5..mate-in-1 opportunity; the exact mate distance is random
+        by position, and the special mate pause is used at most once
+      * regular pause time uses the existing 10-15 second game budget
     """
     global _last_bot_natural_delay
     global _bot_timing_move_count
     global _thinking_budget_remaining
     global _thinking_budget_total
     global _thinking_move_cooldown_remaining
+    global _mate_pause_used
 
     if len(board.move_stack) <= 1:
         _bot_timing_move_count = 0
@@ -8190,6 +8195,7 @@ def natural_bot_move_delay(
         )
         _thinking_budget_remaining = _thinking_budget_total
         _thinking_move_cooldown_remaining = 0
+        _mate_pause_used = False
 
     _bot_timing_move_count += 1
 
@@ -8208,6 +8214,67 @@ def natural_bot_move_delay(
     if not thinking_enabled:
         return max(0.0, float(delay))
 
+    # ============================================================
+    # AFTER MOVE 50:
+    # No normal thinking pauses anymore. The only allowed long pause
+    # is one mate-in-5..mate-in-1 moment for the entire game.
+    # ============================================================
+    if _bot_timing_move_count > BOT_POST_50_MOVE:
+        if _mate_pause_used:
+            return max(0.0, float(delay))
+
+        mate_distance = None
+
+        if isinstance(engine_result, list):
+            for info in engine_result:
+                try:
+                    score_obj = info.get("score")
+                    if score_obj is None:
+                        continue
+
+                    mate_score = score_obj.pov(board.turn).mate()
+
+                    if mate_score is None:
+                        continue
+
+                    mate_distance_abs = abs(int(mate_score))
+
+                    if (
+                        mate_distance_abs
+                        <= BOT_MATE_PAUSE_MAX_MATE
+                        and mate_distance_abs
+                        >= BOT_MATE_PAUSE_MIN_MATE
+                    ):
+                        mate_distance = mate_distance_abs
+                        break
+                except Exception:
+                    continue
+
+        if mate_distance is None:
+            return max(0.0, float(delay))
+
+        pause_duration = random.uniform(
+            BOT_MATE_PAUSE_MIN,
+            BOT_MATE_PAUSE_MAX
+        )
+
+        _mate_pause_used = True
+
+        # This is the single final mate pause. Keep it separate from the
+        # ordinary pause budget because move-50+ is explicitly mate-only.
+        delay += pause_duration
+
+        print(
+            "[BOT PAUSE] "
+            f"duration={pause_duration:.3f}s "
+            f"reason=MATE M{mate_distance} "
+            f"move={_bot_timing_move_count} "
+            "final_mate_pause=yes",
+            flush=True
+        )
+
+        return max(0.0, float(delay))
+
     if (
         _thinking_budget_remaining is None
         or _thinking_budget_remaining <= BOT_THINK_PAUSE_MIN
@@ -8215,6 +8282,8 @@ def natural_bot_move_delay(
         return max(0.0, float(delay))
 
     # Minimum move gap after every real pause.
+    # This is deliberately only 5-8 moves; after that, the actual position
+    # and random eligibility decide whether another pause is appropriate.
     if _thinking_move_cooldown_remaining > 0:
         _thinking_move_cooldown_remaining -= 1
         return max(0.0, float(delay))
@@ -8322,8 +8391,13 @@ def natural_bot_move_delay(
     if signal_score <= 0.0:
         return max(0.0, float(delay))
 
-    # Position-dependent random eligibility. This is intentionally stochastic
-    # even after the cooldown expires, so pauses do not occur every 8-12 moves.
+    # Position-dependent random eligibility.
+    #
+    # Important: there is NO target like "pause again at move 8/10/12".
+    # The 5-8 block above is only a hard minimum. Once it expires, this
+    # stochastic position gate is evaluated independently on each move.
+    # Weak/quiet positions tend to wait longer; genuinely rich positions
+    # can pause soon after the minimum block.
     eligibility = min(
         BOT_THINK_ELIGIBILITY_MAX,
         max(
@@ -8360,7 +8434,9 @@ def natural_bot_move_delay(
         float(_thinking_budget_remaining) - pause_duration
     )
 
-    # After a pause, 8-12 bot moves are guaranteed pause-free.
+    # Only a minimum 5-8 move refractory period is guaranteed. The next
+    # pause is NOT scheduled for a fixed later move; it must pass the fresh
+    # position-based eligibility test above.
     _thinking_move_cooldown_remaining = random.randint(
         BOT_PAUSE_MOVE_COOLDOWN_MIN,
         BOT_PAUSE_MOVE_COOLDOWN_MAX
@@ -8373,7 +8449,8 @@ def natural_bot_move_delay(
         f"duration={pause_duration:.3f}s "
         f"remaining_budget={_thinking_budget_remaining:.3f}s "
         f"next_pause_block={_thinking_move_cooldown_remaining} moves "
-        f"eligibility={eligibility:.2f}",
+        f"eligibility={eligibility:.2f} "
+        f"move={_bot_timing_move_count}",
         flush=True
     )
 
