@@ -1137,19 +1137,19 @@ def match_ui_draw(
 
     for key in (
         "rematch_toggle_rect",
-        "new_match_toggle_rect"
+        "new_match_toggle_rect",
     ):
         match_ui[key] = None
 
     height, width = display_frame.shape[:2]
 
+    # Dedicated control panel: always outside the chess board.
     panel_w = min(
         560,
         max(420, width - 16)
     )
-    panel_h = 150
+    panel_h = 176
 
-    # Always place controls outside the chess board.
     if board_coords is None:
         panel_x = max(
             8,
@@ -1166,39 +1166,32 @@ def match_ui_draw(
         )
 
         candidates = [
-            (bx + bw + 10, max(52, by)),
-            (bx - panel_w - 10, max(52, by)),
-            (max(8, bx), max(8, by - panel_h - 10)),
-            (max(8, bx), min(height - panel_h - 8, by + bh + 10)),
-            (8, 52),
-            (max(8, width - panel_w - 8), 52),
+            (bx + bw + 12, max(52, by)),
+            (bx - panel_w - 12, max(52, by)),
+            (max(8, bx), max(8, by - panel_h - 12)),
+            (max(8, bx), min(height - panel_h - 8, by + bh + 12)),
         ]
 
-        def intersects(rect):
+        def valid(rect):
             x1, y1, x2, y2 = rect
-            return not (
-                x2 <= board_rect[0]
-                or x1 >= board_rect[2]
-                or y2 <= board_rect[1]
-                or y1 >= board_rect[3]
+            return (
+                x1 >= 4
+                and y1 >= 4
+                and x2 <= width - 4
+                and y2 <= height - 4
+                and not (
+                    x2 <= board_rect[0]
+                    or x1 >= board_rect[2]
+                    or y2 <= board_rect[1]
+                    or y1 >= board_rect[3]
+                )
             )
 
-        panel_x, panel_y = candidates[-1]
+        panel_x, panel_y = candidates[0]
 
         for cx, cy in candidates:
-            rect = (
-                cx,
-                cy,
-                cx + panel_w,
-                cy + panel_h
-            )
-
-            if (
-                cx >= 4
-                and cy >= 4
-                and cx + panel_w <= width - 4
-                and cy + panel_h <= height - 4
-                and not intersects(rect)
+            if valid(
+                (cx, cy, cx + panel_w, cy + panel_h)
             ):
                 panel_x, panel_y = cx, cy
                 break
@@ -1219,36 +1212,39 @@ def match_ui_draw(
         panel_y + panel_h
     )
 
+    # Professional dark-panel palette.
+    bg = (24, 29, 41)
+    border = (255, 210, 90)
+    accent = (255, 220, 110)
+    text_main = (245, 248, 255)
+    text_muted = (185, 195, 210)
+    active = (100, 225, 150)
+    inactive = (165, 145, 255)
+
     overlay = display_frame.copy()
 
     cv2.rectangle(
         overlay,
         (panel_x, panel_y),
-        (
-            panel_x + panel_w,
-            panel_y + panel_h
-        ),
-        (18, 18, 18),
+        (panel_x + panel_w, panel_y + panel_h),
+        bg,
         -1
     )
 
     display_frame[:] = cv2.addWeighted(
         overlay,
-        0.84,
+        0.92,
         display_frame,
-        0.16,
+        0.08,
         0
     )
 
     cv2.rectangle(
         display_frame,
         (panel_x, panel_y),
-        (
-            panel_x + panel_w,
-            panel_y + panel_h
-        ),
-        (0, 255, 255),
-        1
+        (panel_x + panel_w, panel_y + panel_h),
+        border,
+        2
     )
 
     phase_text = {
@@ -1265,10 +1261,10 @@ def match_ui_draw(
     cv2.putText(
         display_frame,
         f"MATCH: {phase_text}",
-        (panel_x + 12, panel_y + 20),
+        (panel_x + 14, panel_y + 22),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.43,
-        (0, 255, 255),
+        0.45,
+        accent,
         1
     )
 
@@ -1288,25 +1284,25 @@ def match_ui_draw(
     cv2.putText(
         display_frame,
         (
-            f"STOCKFISH PREFERENCE "
-            f"BEST:{pref.get('best','-')} {cp_text(pref.get('best_cp'))} "
-            f"SELECTED:{pref.get('selected','-')} {cp_text(pref.get('selected_cp'))} "
+            f"BEST:{pref.get('best','-')} {cp_text(pref.get('best_cp'))}  "
+            f"SELECTED:{pref.get('selected','-')} "
+            f"{cp_text(pref.get('selected_cp'))}  "
             f"RANK:{pref.get('rank','-')}"
         ),
-        (panel_x + 12, panel_y + 41),
+        (panel_x + 14, panel_y + 46),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.38,
-        (255, 255, 255),
+        0.36,
+        text_main,
         1
     )
 
     cv2.putText(
         display_frame,
-        f"REASON: {str(pref.get('reason','-'))[:82]}",
-        (panel_x + 12, panel_y + 59),
+        f"REASON: {str(pref.get('reason','-'))[:92]}",
+        (panel_x + 14, panel_y + 66),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.32,
-        (220, 220, 220),
+        0.31,
+        text_muted,
         1
     )
 
@@ -1327,10 +1323,10 @@ def match_ui_draw(
     cv2.putText(
         display_frame,
         guard_text,
-        (panel_x + 12, panel_y + 77),
+        (panel_x + 14, panel_y + 86),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.35,
-        (0, 255, 255),
+        0.34,
+        accent,
         1
     )
 
@@ -1344,10 +1340,10 @@ def match_ui_draw(
     cv2.putText(
         display_frame,
         f"AUTO ACTION: {auto_action}",
-        (panel_x + 12, panel_y + 95),
+        (panel_x + 14, panel_y + 104),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.35,
-        (255, 255, 255),
+        0.34,
+        text_main,
         1
     )
 
@@ -1369,23 +1365,23 @@ def match_ui_draw(
     )
 
     gap = 10
-    button_h = 28
-    usable_w = panel_w - 24
+    button_h = 32
+    usable_w = panel_w - 28
     button_w = max(
         150,
         int((usable_w - gap) / 2)
     )
 
-    by = panel_y + 108
+    by = panel_y + 122
 
     for index, (label, rect_key) in enumerate(labels):
-        bx1 = panel_x + 12 + index * (button_w + gap)
+        bx1 = panel_x + 14 + index * (button_w + gap)
         bx2 = min(
-            panel_x + panel_w - 12,
+            panel_x + panel_w - 14,
             bx1 + button_w
         )
         by2 = min(
-            panel_y + panel_h - 8,
+            panel_y + panel_h - 10,
             by + button_h
         )
 
@@ -1396,21 +1392,13 @@ def match_ui_draw(
             by2
         )
 
-        active = (
-            label.endswith(": ON")
-        )
-
-        border = (
-            (0, 255, 0)
-            if active
-            else (0, 255, 255)
-        )
+        enabled = label.endswith(": ON")
 
         cv2.rectangle(
             display_frame,
             (bx1, by),
             (bx2, by2),
-            (35, 35, 35),
+            (38, 45, 60),
             -1
         )
 
@@ -1418,7 +1406,7 @@ def match_ui_draw(
             display_frame,
             (bx1, by),
             (bx2, by2),
-            border,
+            active if enabled else inactive,
             2
         )
 
@@ -1445,9 +1433,11 @@ def match_ui_draw(
             (tx, ty),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.34,
-            (255, 255, 255),
+            text_main,
             1
         )
+
+
 
 
 _SCREEN_MOVE_HISTORY_CACHE_KEY = None
@@ -1501,7 +1491,12 @@ def move_history_lines_for_screen(board, max_plies=24):
     return _SCREEN_MOVE_HISTORY_CACHE_LINES
 
 
-def draw_move_history_panel(display_frame, board, board_coords):
+def draw_move_history_panel(
+    display_frame,
+    board,
+    board_coords,
+    match_ui=None
+):
     if board is None or board_coords is None:
         return
 
@@ -1521,27 +1516,84 @@ def draw_move_history_panel(display_frame, board, board_coords):
     )
     panel_h = min(
         height - 20,
-        38 + len(lines) * 19
+        44 + len(lines) * 19
     )
 
-    panel_x = bx + bw + 10
+    board_rect = (
+        bx,
+        by,
+        bx + bw,
+        by + bh
+    )
 
-    if panel_x + panel_w > width - 8:
-        panel_x = max(
-            8,
-            bx - panel_w - 10
+    controls_rect = (
+        match_ui.get("controls_rect")
+        if match_ui is not None
+        else None
+    )
+
+    candidates = [
+        (bx - panel_w - 12, max(52, by)),
+        (bx + bw + 12, max(52, by)),
+        (max(8, bx), max(8, by - panel_h - 12)),
+        (max(8, bx), min(height - panel_h - 8, by + bh + 12)),
+    ]
+
+    def overlaps(a, b):
+        if b is None:
+            return False
+        ax1, ay1, ax2, ay2 = a
+        bx1, by1, bx2, by2 = b
+        return not (
+            ax2 <= bx1
+            or ax1 >= bx2
+            or ay2 <= by1
+            or ay1 >= by2
         )
 
+    panel_x, panel_y = candidates[0]
+
+    for cx, cy in candidates:
+        rect = (
+            cx,
+            cy,
+            cx + panel_w,
+            cy + panel_h
+        )
+
+        if (
+            cx >= 4
+            and cy >= 4
+            and cx + panel_w <= width - 4
+            and cy + panel_h <= height - 4
+            and not overlaps(rect, board_rect)
+            and not overlaps(rect, controls_rect)
+        ):
+            panel_x, panel_y = cx, cy
+            break
+
+    panel_x = max(
+        4,
+        min(width - panel_w - 4, panel_x)
+    )
     panel_y = max(
-        54,
-        by
+        4,
+        min(height - panel_h - 4, panel_y)
     )
 
-    if panel_y + panel_h > height - 8:
-        panel_y = max(
-            54,
-            height - panel_h - 8
+    if match_ui is not None:
+        match_ui["move_history_rect"] = (
+            panel_x,
+            panel_y,
+            panel_x + panel_w,
+            panel_y + panel_h
         )
+
+    # Separate, clean move-history panel palette.
+    bg = (28, 32, 46)
+    border = (190, 135, 255)
+    header = (215, 165, 255)
+    text_main = (245, 248, 255)
 
     overlay = display_frame.copy()
 
@@ -1552,15 +1604,15 @@ def draw_move_history_panel(display_frame, board, board_coords):
             min(width - 8, panel_x + panel_w),
             min(height - 8, panel_y + panel_h)
         ),
-        (18, 18, 18),
+        bg,
         -1
     )
 
     display_frame[:] = cv2.addWeighted(
         overlay,
-        0.82,
+        0.94,
         display_frame,
-        0.18,
+        0.06,
         0
     )
 
@@ -1571,17 +1623,17 @@ def draw_move_history_panel(display_frame, board, board_coords):
             min(width - 8, panel_x + panel_w),
             min(height - 8, panel_y + panel_h)
         ),
-        (0, 255, 255),
-        1
+        border,
+        2
     )
 
     cv2.putText(
         display_frame,
         "MOVES",
-        (panel_x + 10, panel_y + 20),
+        (panel_x + 12, panel_y + 23),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.46,
-        (0, 255, 255),
+        0.47,
+        header,
         1
     )
 
@@ -1590,15 +1642,14 @@ def draw_move_history_panel(display_frame, board, board_coords):
             display_frame,
             line,
             (
-                panel_x + 10,
-                panel_y + 40 + row_index * 19
+                panel_x + 12,
+                panel_y + 45 + row_index * 19
             ),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.37,
-            (255, 255, 255),
+            text_main,
             1
         )
-
 
 
 
@@ -13212,10 +13263,17 @@ def main():
                         analysis_state
                     )
 
+                    match_ui_draw(
+                        display_frame,
+                        match_ui,
+                        cached_board_coords
+                    )
+
                     draw_move_history_panel(
                         display_frame,
                         board,
-                        cached_board_coords
+                        cached_board_coords,
+                        match_ui
                     )
 
                 else:
@@ -13240,11 +13298,12 @@ def main():
                         2
                     )
 
-                match_ui_draw(
-                    display_frame,
-                    match_ui,
-                    cached_board_coords
-                )
+                if match_ui.get("phase") not in ("GAME", "AWAIT_RESULT"):
+                    match_ui_draw(
+                        display_frame,
+                        match_ui,
+                        cached_board_coords
+                    )
 
                 cv2.imshow(
                     "Chess Vision Tracker",
