@@ -12305,6 +12305,16 @@ def main():
                                     )
                                 )
 
+                                # Previous completed bot-position evaluation is needed
+                                # by the timing simulator for both book and engine moves.
+                                selected_previous_eval = (
+                                    analysis_state.get(
+                                        "eval_cp"
+                                    )
+                                    if analysis_state is not None
+                                    else None
+                                )
+
                                 # Freeze the Stockfish decision for this board position.
                                 # The same move is used for click, verification and retry.
                                 locked_bot_move = None
