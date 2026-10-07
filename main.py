@@ -188,7 +188,7 @@ BOT_SOURCE_TO_TARGET_DELAY_MAX = 0.012
 # When the normal safe pool contains too few lower-ranked choices, allow a
 # small extra evaluation band ONLY for rank-diversity selection. This does not
 # change forced-best, mate, promotion, capture, or physical-safety branches.
-HUMAN_SELECTION_DIVERSITY_EXTRA_DROP = 0.08
+HUMAN_SELECTION_DIVERSITY_EXTRA_DROP = 0.04
 
 # Retained as counters for match-state reset/log compatibility.
 RANDOM_BUFFER_MOVE_MIN = 5
@@ -2406,6 +2406,8 @@ HUMAN_ADVANTAGE_HOLD_MAX_MOVES = 3
 HUMAN_ADVANTAGE_GROWTH_STEP_MIN_CP = 20
 HUMAN_ADVANTAGE_GROWTH_STEP_MAX_CP = 45
 HUMAN_ADVANTAGE_GROWTH_TRIGGER_CP = 15
+HUMAN_ADVANTAGE_GROWTH_PREFERENCE_MIN_CP = 10
+HUMAN_ADVANTAGE_GROWTH_PREFERENCE_MAX_CP = 35
 
 # Winning-position guard:
 # Human-like selection is allowed, but once there is a real advantage it must
@@ -10315,12 +10317,17 @@ def choose_stockfish_move(
                     )
                 )
             else:
+                growth_preference_cp = random.randint(
+                    HUMAN_ADVANTAGE_GROWTH_PREFERENCE_MIN_CP,
+                    HUMAN_ADVANTAGE_GROWTH_PREFERENCE_MAX_CP
+                )
                 desired_cp = min(
                     best_cp,
                     max(
                         floor_cp,
                         int(
                             advantage_target_cp
+                            + growth_preference_cp
                         )
                     )
                 )
@@ -10364,35 +10371,35 @@ def choose_stockfish_move(
                     pool = maintain_pool
 
         if advantage_mode and advantage_growth:
-            # Keep #1/#2 available, but deliberately make #3+ more likely.
-            # Forced-best, mate, promotion, and safety branches above are
-            # untouched; this only changes the normal fuzzy shuffle weighting.
+            # Keep #1/#2 available, but spread lower-rank preference instead
+            # of making #3 the default. Growth remains protected by the CP
+            # preference above.
             rank_factors = {
                 0: 0.50,
                 1: 0.62,
-                2: 0.88,
-                3: 1.05,
-                4: 1.14,
+                2: 0.82,
+                3: 1.06,
+                4: 1.15,
                 5: 1.16,
-                6: 1.15,
-                7: 1.12,
-                8: 1.09,
-                9: 1.06,
-                10: 1.03,
+                6: 1.14,
+                7: 1.11,
+                8: 1.08,
+                9: 1.05,
+                10: 1.02,
                 11: 1.00,
                 12: 0.98,
                 13: 0.96,
                 14: 0.94,
             }
         else:
-            # Same principle in normal play: #3+ should usually win the fuzzy
-            # draw when several safe near-equal candidates exist.
+            # Spread the lower-rank preference across #3-#8 so #3 does not
+            # become the default answer when several safe choices exist.
             rank_factors = {
                 0: 0.55,
                 1: 0.68,
-                2: 0.90,
+                2: 0.82,
                 3: 1.06,
-                4: 1.14,
+                4: 1.15,
                 5: 1.16,
                 6: 1.14,
                 7: 1.11,
@@ -10452,7 +10459,7 @@ def choose_stockfish_move(
         if (
             diversity_lower_pool
             and (
-                len(pool) < 3
+                len(pool) <= 1
                 or not lower_rank_pool
             )
         ):
