@@ -152,11 +152,20 @@ BOT_EVERY_MOVE_DELAY_MIN = 0.000
 BOT_EVERY_MOVE_DELAY_MAX = 0.010
 BOT_THINKING_ENABLED_DEFAULT = True
 BOT_THINKING_START_AFTER_MOVE = 10
-BOT_PAUSE_MOVE_COOLDOWN_MIN = 8
+# Irregular pause cadence:
+# sometimes another pause may be considered after 5-8 moves, while quieter
+# positions can naturally wait 9-12+ moves. This is only a minimum refractory
+# window; there is no fixed "pause every N moves" schedule.
+BOT_PAUSE_MOVE_COOLDOWN_MIN = 5
 BOT_PAUSE_MOVE_COOLDOWN_MAX = 12
 BOT_PAUSE_ELIGIBILITY_SCALE = 0.55
+BOT_POST_50_MOVE = 50
+BOT_MATE_PAUSE_MIN_MATE = 1
+BOT_MATE_PAUSE_MAX_MATE = 5
 BOT_THINK_PAUSE_MIN = 2.0
 BOT_THINK_PAUSE_MAX = 5.0
+BOT_MATE_PAUSE_MIN = 2.0
+BOT_MATE_PAUSE_MAX = 5.0
 BOT_THINK_BUDGET_MIN = 10.0
 BOT_THINK_BUDGET_MAX = 15.0
 BOT_THINK_COOLDOWN_MIN = 5.0
@@ -2433,7 +2442,7 @@ HUMAN_SELECTION_NON_BEST_CHANCE = 0.88
 # In normal human-like selection, do not let #1/#2 dominate when #3+
 # alternatives are safely available. Forced mate / forced-best / explicit
 # punishment paths remain unchanged.
-HUMAN_SELECTION_TOP12_MAX_CHANCE = 0.18
+HUMAN_SELECTION_TOP12_MAX_CHANCE = 0.10
 
 # In the mating phase, first take genuinely free material when it is safe.
 # Once the opponent has only one non-king piece left, stop cleanup and mate.
@@ -8282,8 +8291,9 @@ def natural_bot_move_delay(
         return max(0.0, float(delay))
 
     # Minimum move gap after every real pause.
-    # This is deliberately only 5-8 moves; after that, the actual position
-    # and random eligibility decide whether another pause is appropriate.
+    # The refractory length itself is randomized from 5-12 moves. This is
+    # only a hard minimum; once it expires, the current position must still
+    # pass the situation-based stochastic eligibility gate below.
     if _thinking_move_cooldown_remaining > 0:
         _thinking_move_cooldown_remaining -= 1
         return max(0.0, float(delay))
@@ -8434,9 +8444,9 @@ def natural_bot_move_delay(
         float(_thinking_budget_remaining) - pause_duration
     )
 
-    # Only a minimum 5-8 move refractory period is guaranteed. The next
-    # pause is NOT scheduled for a fixed later move; it must pass the fresh
-    # position-based eligibility test above.
+    # Only the randomized refractory minimum is set here. The next
+    # pause is NOT scheduled for a specific move; after this block, the
+    # current position must pass a fresh situation-based eligibility test.
     _thinking_move_cooldown_remaining = random.randint(
         BOT_PAUSE_MOVE_COOLDOWN_MIN,
         BOT_PAUSE_MOVE_COOLDOWN_MAX
@@ -10349,40 +10359,45 @@ def choose_stockfish_move(
                     pool = maintain_pool
 
         if advantage_mode and advantage_growth:
+            # Keep #1/#2 available, but deliberately make #3+ more likely.
+            # Forced-best, mate, promotion, and safety branches above are
+            # untouched; this only changes the normal fuzzy shuffle weighting.
             rank_factors = {
-                0: 0.70,
-                1: 0.78,
-                2: 0.92,
-                3: 1.02,
-                4: 1.10,
-                5: 1.12,
-                6: 1.12,
-                7: 1.10,
-                8: 1.08,
+                0: 0.50,
+                1: 0.62,
+                2: 0.88,
+                3: 1.05,
+                4: 1.14,
+                5: 1.16,
+                6: 1.15,
+                7: 1.12,
+                8: 1.09,
                 9: 1.06,
-                10: 1.04,
-                11: 1.02,
-                12: 1.00,
-                13: 0.98,
-                14: 0.96,
+                10: 1.03,
+                11: 1.00,
+                12: 0.98,
+                13: 0.96,
+                14: 0.94,
             }
         else:
+            # Same principle in normal play: #3+ should usually win the fuzzy
+            # draw when several safe near-equal candidates exist.
             rank_factors = {
-                0: 0.85,
-                1: 0.90,
-                2: 0.98,
-                3: 1.04,
-                4: 1.08,
-                5: 1.10,
-                6: 1.08,
-                7: 1.06,
-                8: 1.04,
-                9: 1.02,
-                10: 1.00,
-                11: 0.98,
-                12: 0.96,
-                13: 0.94,
-                14: 0.92,
+                0: 0.55,
+                1: 0.68,
+                2: 0.90,
+                3: 1.06,
+                4: 1.14,
+                5: 1.16,
+                6: 1.14,
+                7: 1.11,
+                8: 1.08,
+                9: 1.05,
+                10: 1.02,
+                11: 1.00,
+                12: 0.98,
+                13: 0.96,
+                14: 0.94,
             }
 
         lower_rank_pool = [
