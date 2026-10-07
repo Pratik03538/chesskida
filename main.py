@@ -135,11 +135,7 @@ CLICK_CIRCLE_AREA = 0.08
 CLICK_CIRCLE_RADIUS_FRACTION = math.sqrt(CLICK_CIRCLE_AREA / math.pi)
 
 # Natural bot move timing.
-# Ordinary moves vary from almost instant to about half a second.
-# Tactical moves get NO extra thinking delay.
-# Strong strategic positions occasionally get a longer human-like pause.
-# A sudden M5-or-closer position gets exactly one 1-2 second pause; the
-# following mate moves are then played immediately.
+# The tiny per-move base delay is retained unchanged.
 BOT_NATURAL_DELAY_MIN = 0.15
 BOT_NATURAL_DELAY_MAX = 0.45
 BOT_STRATEGIC_DELAY_MIN = 0.62
@@ -147,19 +143,26 @@ BOT_STRATEGIC_DELAY_MAX = 1.30
 BOT_MATE_DELAY_MIN = 1.00
 BOT_MATE_DELAY_MAX = 2.00
 
-# Keep normal bot moves extremely fast, but add only 1-2 genuine
-# human-like thinking pauses somewhere between bot moves 15 and 40.
-# The pause duration is intentionally much longer (2-5s) so it feels like
-# the player is actually thinking rather than just having network/GUI delay.
+# Thinking simulator:
+# No fixed move-number targets. Every move gets a randomized eligibility
+# check, but a pause is considered only when the current position looks
+# thinking-worthy. A randomized cooldown and remaining per-game budget then
+# decide whether a pause is actually taken.
 BOT_EVERY_MOVE_DELAY_MIN = 0.000
 BOT_EVERY_MOVE_DELAY_MAX = 0.010
+BOT_THINKING_ENABLED_DEFAULT = True
 BOT_THINK_PAUSE_MIN = 2.0
 BOT_THINK_PAUSE_MAX = 5.0
-BOT_THINK_PAUSE_FIRST_MOVE = 15
-BOT_THINK_PAUSE_LAST_MOVE = 40
-BOT_THINK_PAUSE_CANDIDATES_MIN = 1
-BOT_THINK_PAUSE_CANDIDATES_MAX = 2
-BOT_THINK_PAUSE_TAKE_CHANCE = 1.00
+BOT_THINK_BUDGET_MIN = 10.0
+BOT_THINK_BUDGET_MAX = 15.0
+BOT_THINK_COOLDOWN_MIN = 5.0
+BOT_THINK_COOLDOWN_MAX = 10.0
+BOT_THINK_ELIGIBILITY_MIN = 0.18
+BOT_THINK_ELIGIBILITY_MAX = 0.65
+BOT_THINK_REASONABLE_CP = 60
+BOT_THINK_UNCERTAINTY_CP = 75
+BOT_THINK_SHARP_EVAL_CP = 80
+BOT_THINK_STRATEGIC_LEGAL_MOVES = 24
 BOT_OPENING_FAST_VERIFY_MOVES = 10
 BOT_STRONG_FAVOR_CP = 250
 BOT_DELAY_REPEAT_GAP = 0.045
@@ -234,6 +237,17 @@ def match_ui_mouse_callback(event, x, y, flags, param):
             return False
         x1, y1, x2, y2 = rect
         return x1 <= x <= x2 and y1 <= y <= y2
+
+    if inside(param.get("thinking_toggle_rect")):
+        param["thinking_enabled"] = not param.get(
+            "thinking_enabled",
+            BOT_THINKING_ENABLED_DEFAULT
+        )
+        print(
+            "[THINKING UI] THINKING = "
+            f"{'ON' if param['thinking_enabled'] else 'OFF'}"
+        )
+        return
 
     if inside(param.get("new_match_toggle_rect")):
         param["new_match_enabled"] = (
@@ -1136,6 +1150,7 @@ def match_ui_draw(
         return
 
     for key in (
+        "thinking_toggle_rect",
         "rematch_toggle_rect",
         "new_match_toggle_rect",
     ):
@@ -1148,7 +1163,7 @@ def match_ui_draw(
         560,
         max(420, width - 16)
     )
-    panel_h = 176
+    panel_h = 230
 
     if board_coords is None:
         panel_x = max(
@@ -1347,6 +1362,43 @@ def match_ui_draw(
         1
     )
 
+    thinking_enabled = bool(
+        match_ui.get(
+            "thinking_enabled",
+            BOT_THINKING_ENABLED_DEFAULT
+        )
+    )
+
+    if _thinking_budget_remaining is None:
+        budget_text = (
+            f"{BOT_THINK_BUDGET_MIN:.0f}-{BOT_THINK_BUDGET_MAX:.0f}s"
+        )
+    else:
+        budget_text = f"{_thinking_budget_remaining:.1f}s LEFT"
+
+    cv2.putText(
+        display_frame,
+        (
+            f"THINKING: {'ON' if thinking_enabled else 'OFF'}  |  "
+            f"PAUSE: {BOT_THINK_PAUSE_MIN:.1f}-{BOT_THINK_PAUSE_MAX:.1f}s"
+        ),
+        (panel_x + 14, panel_y + 124),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.33,
+        accent,
+        1
+    )
+
+    cv2.putText(
+        display_frame,
+        f"TOTAL THINKING BUDGET: {budget_text}  |  RANDOM COOLDOWN",
+        (panel_x + 14, panel_y + 144),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.30,
+        text_muted,
+        1
+    )
+
     new_match_label = (
         "NEW MATCH: ON"
         if match_ui.get("new_match_enabled")
@@ -1357,6 +1409,71 @@ def match_ui_draw(
         "REMATCH: ON"
         if match_ui.get("rematch_enabled")
         else "REMATCH: OFF"
+    )
+
+    # Thinking toggle sits above the existing match-action controls.
+    think_label = (
+        "THINKING: ON"
+        if thinking_enabled
+        else "THINKING: OFF"
+    )
+
+    think_bx1 = panel_x + 14
+    think_bx2 = panel_x + min(
+        190,
+        panel_w - 14
+    )
+    think_by1 = panel_y + 152
+    think_by2 = panel_y + 180
+
+    match_ui["thinking_toggle_rect"] = (
+        think_bx1,
+        think_by1,
+        think_bx2,
+        think_by2
+    )
+
+    cv2.rectangle(
+        display_frame,
+        (think_bx1, think_by1),
+        (think_bx2, think_by2),
+        (38, 45, 60),
+        -1
+    )
+
+    cv2.rectangle(
+        display_frame,
+        (think_bx1, think_by1),
+        (think_bx2, think_by2),
+        active if thinking_enabled else inactive,
+        2
+    )
+
+    think_size = cv2.getTextSize(
+        think_label,
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.34,
+        1
+    )[0]
+
+    think_tx = think_bx1 + max(
+        2,
+        (think_bx2 - think_bx1 - think_size[0]) // 2
+    )
+
+    think_ty = think_by1 + max(
+        think_size[1] + 2,
+        ((think_by2 - think_by1) + think_size[1]) // 2
+    )
+
+    cv2.putText(
+        display_frame,
+        think_label,
+        (think_tx, think_ty),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.34,
+        text_main,
+        1
     )
 
     labels = (
@@ -1372,7 +1489,7 @@ def match_ui_draw(
         int((usable_w - gap) / 2)
     )
 
-    by = panel_y + 122
+    by = panel_y + 186
 
     for index, (label, rect_key) in enumerate(labels):
         bx1 = panel_x + 14 + index * (button_w + gap)
@@ -2416,8 +2533,9 @@ _progress_times = {}
 _progress_last_text = {}
 _last_bot_natural_delay = None
 _bot_timing_move_count = 0
-_bot_think_pause_targets = ()
-_bot_think_pause_used = 0
+_thinking_budget_remaining = None
+_thinking_budget_total = None
+_thinking_cooldown_until = 0.0
 _mate_pause_used = False
 
 
@@ -8019,101 +8137,218 @@ def natural_bot_move_delay(
     move,
     engine_result=None,
     selection_meta=None,
-    moves_since_buffer=0
+    moves_since_buffer=0,
+    thinking_enabled=BOT_THINKING_ENABLED_DEFAULT,
+    previous_eval_white_cp=None
 ):
-    """Return a 0-10ms delay on every move plus 1-2 human-like pauses.
+    """Return the retained base delay plus an event/budget-based thinking pause.
 
-    Exactly 1-2 pause targets are chosen randomly per game inside the
-    15-40 bot-move window. Each eligible target gets a 2-5s thinking pause.
-    Tactical / forced-looking moves still skip the pause, while pending
-    retries never call this function and therefore never repeat the pause.
+    No fixed move numbers are used. Each move receives a randomized
+    eligibility check, but a pause is considered only when the position
+    provides useful thinking signals. A randomized cooldown prevents
+    consecutive pauses, and a 10-15 second per-game budget caps total
+    thinking time.
     """
     global _last_bot_natural_delay
     global _bot_timing_move_count
-    global _bot_think_pause_targets
-    global _bot_think_pause_used
+    global _thinking_budget_remaining
+    global _thinking_budget_total
+    global _thinking_cooldown_until
 
-    # Reset timing state at the beginning of a new game.
+    # Keep the existing move counter because other verification logic uses it.
+    # It is deliberately NOT used to schedule thinking pauses.
     if len(board.move_stack) <= 1:
         _bot_timing_move_count = 0
-        candidate_count = random.randint(
-            BOT_THINK_PAUSE_CANDIDATES_MIN,
-            BOT_THINK_PAUSE_CANDIDATES_MAX
+        _thinking_budget_total = random.uniform(
+            BOT_THINK_BUDGET_MIN,
+            BOT_THINK_BUDGET_MAX
         )
-        _bot_think_pause_targets = tuple(
-            sorted(
-                random.sample(
-                    range(
-                        BOT_THINK_PAUSE_FIRST_MOVE,
-                        BOT_THINK_PAUSE_LAST_MOVE + 1
-                    ),
-                    candidate_count
-                )
-            )
-        )
-        _bot_think_pause_used = 0
-        _last_bot_natural_delay = None
+        _thinking_budget_remaining = _thinking_budget_total
+        _thinking_cooldown_until = 0.0
 
-    # Only first-attempt bot decisions consume a timing move number.
     _bot_timing_move_count += 1
 
-    # Every move gets only a tiny 0-10ms random base delay.
+    # Existing tiny base delay remains unchanged.
     base_delay = random.uniform(
         BOT_EVERY_MOVE_DELAY_MIN,
         BOT_EVERY_MOVE_DELAY_MAX
     )
     delay = base_delay
+    _last_bot_natural_delay = base_delay
 
-    # 1-2 human-like thinking pauses, randomly placed between moves 15-40.
-    # Never pause twice on the same game move, and never pause more than the
-    # randomly selected 1-2 total targets.
+    if not thinking_enabled:
+        return max(0.0, float(delay))
+
     if (
-        _bot_think_pause_used < BOT_THINK_PAUSE_CANDIDATES_MAX
-        and _bot_timing_move_count in _bot_think_pause_targets
+        _thinking_budget_remaining is None
+        or _thinking_budget_remaining <= BOT_THINK_PAUSE_MIN
     ):
-        tactical = (
-            board.is_capture(move)
+        return max(0.0, float(delay))
+
+    now = time.perf_counter()
+
+    if now < _thinking_cooldown_until:
+        return max(0.0, float(delay))
+
+    # Position-thinking signals.
+    signal_score = 0.0
+
+    # Multiple reasonable moves / evaluation uncertainty from MultiPV.
+    scores = []
+    if isinstance(engine_result, list):
+        for info in engine_result[:TRAINING_MULTI_PV]:
+            try:
+                score_obj = info.get("score")
+                if score_obj is None:
+                    continue
+
+                cp = score_to_cp(
+                    score_obj.pov(board.turn)
+                )
+
+                if cp is not None:
+                    scores.append(int(cp))
+            except Exception:
+                continue
+
+    if len(scores) >= 2:
+        top_cp = scores[0]
+
+        reasonable_count = sum(
+            1
+            for cp in scores
+            if abs(cp - top_cp) <= BOT_THINK_REASONABLE_CP
+        )
+
+        if reasonable_count >= 2:
+            signal_score += 0.34
+
+        second_gap = abs(scores[1] - top_cp)
+
+        if second_gap <= BOT_THINK_UNCERTAINTY_CP:
+            signal_score += 0.24
+
+    # Position immediately after a tactical/forcing move.
+    if board.move_stack:
+        try:
+            previous_board = board.copy(stack=True)
+            last_move = previous_board.pop()
+
+            previous_was_tactical = (
+                previous_board.is_capture(last_move)
+                or previous_board.is_castling(last_move)
+                or last_move.promotion is not None
+                or previous_board.gives_check(last_move)
+            )
+
+            if previous_was_tactical:
+                signal_score += 0.22
+        except Exception:
+            pass
+
+    # Sharp evaluation change relative to the previous completed analysis.
+    if (
+        previous_eval_white_cp is not None
+        and scores
+    ):
+        try:
+            current_eval_white_cp = score_to_cp(
+                engine_result[0]["score"].pov(chess.WHITE)
+            )
+
+            if (
+                current_eval_white_cp is not None
+                and abs(
+                    int(current_eval_white_cp)
+                    - int(previous_eval_white_cp)
+                ) >= BOT_THINK_SHARP_EVAL_CP
+            ):
+                signal_score += 0.22
+        except Exception:
+            pass
+
+    # Strategic decision point: many legal choices.
+    try:
+        legal_count = board.legal_moves.count()
+    except Exception:
+        legal_count = 0
+
+    if legal_count >= BOT_THINK_STRATEGIC_LEGAL_MOVES:
+        signal_score += 0.14
+
+    # Strongly forcing current moves should not consume thinking budget just
+    # because the surrounding position happens to score as complex.
+    try:
+        forced_move = (
+            board.is_check()
+            or board.is_capture(move)
             or board.is_castling(move)
             or move.promotion is not None
             or board.gives_check(move)
         )
+    except Exception:
+        forced_move = False
 
-        rank = None
-        source = ""
-        if isinstance(selection_meta, dict):
-            rank = selection_meta.get("rank")
-            source = str(selection_meta.get("source", "")).upper()
+    if forced_move:
+        signal_score *= 0.35
 
-        thinkworthy = (
-            not tactical
-            and (
-                (isinstance(rank, int) and rank >= 2)
-                or source not in {
-                    "GM_BOOK",
-                    "FREE_CAPTURE",
-                    "QUEEN_PROMOTION",
-                    "MATE_CLEANUP"
-                }
-            )
+    if signal_score <= 0.0:
+        return max(0.0, float(delay))
+
+    # Randomized eligibility happens on every move.
+    eligibility = min(
+        BOT_THINK_ELIGIBILITY_MAX,
+        max(
+            BOT_THINK_ELIGIBILITY_MIN,
+            BOT_THINK_ELIGIBILITY_MIN + signal_score
         )
+    )
 
-        if thinkworthy:
-            think_pause = random.uniform(
-                BOT_THINK_PAUSE_MIN,
-                BOT_THINK_PAUSE_MAX
-            )
-            delay += think_pause
-            _bot_think_pause_used += 1
-            print(
-                "[BOT THINK PAUSE] "
-                f"move={_bot_timing_move_count} "
-                f"duration={think_pause:.3f}s "
-                f"used={_bot_think_pause_used}/"
-                f"{len(_bot_think_pause_targets)}",
-                flush=True
-            )
+    if random.random() >= eligibility:
+        return max(0.0, float(delay))
 
-    _last_bot_natural_delay = base_delay
+    # Important budget rule:
+    # remaining_budget <= minimum_pause -> no more pauses.
+    if _thinking_budget_remaining <= BOT_THINK_PAUSE_MIN:
+        return max(0.0, float(delay))
+
+    pause_max = min(
+        BOT_THINK_PAUSE_MAX,
+        float(_thinking_budget_remaining)
+    )
+
+    if pause_max < BOT_THINK_PAUSE_MIN:
+        return max(0.0, float(delay))
+
+    think_pause = random.uniform(
+        BOT_THINK_PAUSE_MIN,
+        pause_max
+    )
+
+    _thinking_budget_remaining = max(
+        0.0,
+        float(_thinking_budget_remaining) - think_pause
+    )
+
+    _thinking_cooldown_until = (
+        now
+        + random.uniform(
+            BOT_THINK_COOLDOWN_MIN,
+            BOT_THINK_COOLDOWN_MAX
+        )
+    )
+
+    delay += think_pause
+
+    print(
+        "[BOT THINK PAUSE] "
+        f"duration={think_pause:.3f}s "
+        f"remaining_budget={_thinking_budget_remaining:.3f}s "
+        f"eligibility={eligibility:.2f} "
+        f"cooldown={max(0.0, _thinking_cooldown_until - now):.2f}s",
+        flush=True
+    )
+
     return max(0.0, float(delay))
 
 def build_analysis(
@@ -10985,6 +11220,8 @@ def main():
         "requested_action": None,
         "rematch_enabled": False,
         "new_match_enabled": True,
+        "thinking_enabled": BOT_THINKING_ENABLED_DEFAULT,
+        "thinking_toggle_rect": None,
         "rematch_toggle_rect": None,
         "new_match_toggle_rect": None,
         "controls_rect": None,
@@ -12596,9 +12833,14 @@ def main():
                                         natural_delay = natural_bot_move_delay(
                                             board,
                                             best_move,
-                                            engine_result=result,
+                                            engine_result=multipv_result,
                                             selection_meta=selection_meta,
-                                            moves_since_buffer=stockfish_moves_since_buffer
+                                            moves_since_buffer=stockfish_moves_since_buffer,
+                                            thinking_enabled=match_ui.get(
+                                                "thinking_enabled",
+                                                BOT_THINKING_ENABLED_DEFAULT
+                                            ),
+                                            previous_eval_white_cp=selected_previous_eval
                                         )
                                         print(
                                             "[BOT TIMING] "
