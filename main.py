@@ -3527,63 +3527,59 @@ def find_promotion_choice(
         move
     )
 
-    scored = []
+    # Promotion menu order is deterministic: QUEEN, ROOK, BISHOP, KNIGHT.
+    # Never choose among all four slots by "best Q-like template" score.
+    # A bishop can occasionally produce a numerically better Q-template match
+    # than the real queen slot, which can send the click to the wrong piece.
+    ordered = {
+        chess.QUEEN: 0,
+        chess.ROOK: 1,
+        chess.BISHOP: 2,
+        chess.KNIGHT: 3,
+    }
 
-    for square in candidates:
-        crop = get_square_crop(
-            frame,
-            board_coords,
-            square,
-            black_perspective
-        )
+    index = ordered.get(
+        move.promotion
+    )
 
-        if crop is None:
-            continue
+    if (
+        index is None
+        or index >= len(candidates)
+    ):
+        return None
 
+    expected_square = candidates[index]
+
+    expected_crop = get_square_crop(
+        frame,
+        board_coords,
+        expected_square,
+        black_perspective
+    )
+
+    if expected_crop is not None:
         detected, score = classify_square(
-            crop,
+            expected_crop,
             templates,
             expected_symbol=expected
         )
 
         if detected == expected:
-            scored.append(
-                (
-                    float(score),
-                    square
-                )
-            )
-
-    if scored:
-        scored.sort(
-            key=lambda item: item[0]
-        )
-
-        return scored[0][1]
-
-    if allow_fallback and PROMOTION_FALLBACK:
-        ordered = {
-            chess.QUEEN: 0,
-            chess.ROOK: 1,
-            chess.BISHOP: 2,
-            chess.KNIGHT: 3,
-        }
-
-        index = ordered.get(
-            move.promotion
-        )
-
-        if (
-            index is not None
-            and index < len(candidates)
-        ):
-            fallback_square = candidates[index]
-
             print(
-                f"[PROMOTION] fallback selected {expected}"
+                f"[PROMOTION] exact slot confirmed "
+                f"{expected} score={score:.3f}"
             )
+            return expected_square
 
-            return fallback_square
+    # During normal promotion selection we still use the deterministic slot
+    # even when template confirmation is weak; the slot itself is known from
+    # the promotion direction/menu order. During recovery (allow_fallback=False)
+    # we do not click blindly when the expected piece is not visually found.
+    if allow_fallback and PROMOTION_FALLBACK:
+        print(
+            f"[PROMOTION] deterministic slot selected {expected}"
+        )
+        return expected_square
 
     return None
 
