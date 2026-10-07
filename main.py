@@ -8335,7 +8335,12 @@ def adaptive_accuracy_profile(
     }
 
 
-def find_free_mate_cleanup_capture(board, candidates):
+def find_free_mate_cleanup_capture(
+    board,
+    candidates,
+    engine=None,
+    reference_cp=None
+):
     """Find a safe capture of free opponent material during mate play.
 
     A capture qualifies when the target contains a non-king opponent piece,
@@ -8413,6 +8418,19 @@ def find_free_mate_cleanup_capture(board, candidates):
         candidate = candidate_map.get(
             move
         )
+
+        # A mate-cleanup capture is still a free capture, so it must pass the
+        # same deeper safety gate before it can be used to humanize the mate.
+        if (
+            engine is not None
+            and not free_capture_engine_safe(
+                board,
+                move,
+                engine,
+                reference_cp
+            )
+        ):
+            continue
 
         captures.append(
             {
@@ -9316,7 +9334,9 @@ def choose_stockfish_move(
         ):
             cleanup = find_free_mate_cleanup_capture(
                 board,
-                candidates
+                candidates,
+                engine=engine,
+                reference_cp=best_cp
             )
 
             if cleanup is not None:
