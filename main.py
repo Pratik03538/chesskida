@@ -8152,7 +8152,16 @@ def classify_move_quality(
     if loss <= 70:
         return "GOOD"
 
-    if lossdef natural_bot_move_delay(
+    if loss <= 150:
+        return "INACCURACY"
+
+    if loss <= 300:
+        return "MISTAKE"
+
+    return "BLUNDER"
+
+
+def natural_bot_move_delay(
     board,
     move,
     engine_result=None,
