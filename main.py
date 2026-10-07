@@ -185,6 +185,11 @@ BOT_DELAY_REPEAT_GAP = 0.045
 BOT_SOURCE_TO_TARGET_DELAY_MIN = 0.004
 BOT_SOURCE_TO_TARGET_DELAY_MAX = 0.012
 
+# When the normal safe pool contains too few lower-ranked choices, allow a
+# small extra evaluation band ONLY for rank-diversity selection. This does not
+# change forced-best, mate, promotion, capture, or physical-safety branches.
+HUMAN_SELECTION_DIVERSITY_EXTRA_DROP = 0.08
+
 # Retained as counters for match-state reset/log compatibility.
 RANDOM_BUFFER_MOVE_MIN = 5
 RANDOM_BUFFER_MOVE_MAX = 8
@@ -10406,14 +10411,61 @@ def choose_stockfish_move(
             if candidate["rank"] >= 2
         ]
 
-        selection_pool = (
-            lower_rank_pool
-            if (
-                lower_rank_pool
-                and random.random() > HUMAN_SELECTION_TOP12_MAX_CHANCE
+        # If the normal safety/evaluation band leaves fewer than three
+        # candidates, do NOT let the fuzzy draw collapse back to #1/#2.
+        # Build a slightly wider lower-rank-only pool using the same engine
+        # candidates and the same rank cap. The extra band is small and is
+        # used only to create human-like choice diversity.
+        diversity_floor_cp = max(
+            5,
+            int(
+                best_cp
+                * (
+                    1.0
+                    - min(
+                        0.28,
+                        max_drop
+                        + HUMAN_SELECTION_DIVERSITY_EXTRA_DROP
+                    )
+                )
             )
-            else pool
         )
+
+        diversity_lower_pool = [
+            candidate
+            for candidate in candidates
+            if (
+                candidate["rank"] >= 2
+                and candidate["rank"] <= effective_rank_cap
+                and candidate["cp"] >= diversity_floor_cp
+                and candidate["cp"] > 0
+                and (
+                    not winning_guard
+                    or not candidate_hangs_own_piece(
+                        board,
+                        candidate["move"]
+                    )
+                )
+            )
+        ]
+
+        if (
+            diversity_lower_pool
+            and (
+                len(pool) < 3
+                or not lower_rank_pool
+            )
+        ):
+            selection_pool = diversity_lower_pool
+        else:
+            selection_pool = (
+                lower_rank_pool
+                if (
+                    lower_rank_pool
+                    and random.random() > HUMAN_SELECTION_TOP12_MAX_CHANCE
+                )
+                else pool
+            )
 
         weighted = []
 
