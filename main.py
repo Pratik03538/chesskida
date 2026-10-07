@@ -8551,6 +8551,77 @@ def find_priority_queen_promotion(
     return choices[0]
 
 
+def free_capture_position_safe(
+    board,
+    move
+):
+    """Check that a free capture does not immediately expose our position.
+
+    The capture is accepted only when the resulting position does not give the
+    opponent a mate-in-one and does not leave a major/minor own piece hanging
+    for a free immediate capture. This protects the rest of our material while
+    still allowing genuinely free captures.
+    """
+    try:
+        after = board.copy(stack=False)
+        after.push(move)
+
+        # Never choose a free capture that walks into an immediate checkmate.
+        for reply in after.legal_moves:
+            trial = after.copy(stack=False)
+            trial.push(reply)
+
+            if trial.is_checkmate():
+                return False
+
+        piece_values = {
+            chess.PAWN: 1,
+            chess.KNIGHT: 3,
+            chess.BISHOP: 3,
+            chess.ROOK: 5,
+            chess.QUEEN: 9,
+            chess.KING: 100,
+        }
+
+        # After our free capture, reject any immediate opponent capture that
+        # wins one of our major/minor pieces without an immediate recapture.
+        for reply in after.legal_moves:
+            victim = after.piece_at(reply.to_square)
+
+            if victim is None or victim.color != board.turn:
+                continue
+
+            victim_value = piece_values.get(
+                victim.piece_type,
+                0
+            )
+
+            # Pawns are allowed to remain tactically loose; the requested
+            # protection is for the rest of our important pieces.
+            if victim_value < 3:
+                continue
+
+            after_reply = after.copy(stack=False)
+            after_reply.push(reply)
+
+            can_recapture = any(
+                response.to_square == reply.to_square
+                for response in after_reply.legal_moves
+            )
+
+            if can_recapture:
+                continue
+
+            return False
+
+        return True
+
+    except Exception:
+        # Safety-first: if the position cannot be checked reliably, do not
+        # promote this move to a "free capture" automatically.
+        return False
+
+
 def find_priority_capture(
     board,
     candidates,
@@ -8642,8 +8713,12 @@ def find_priority_capture(
         ]
 
         # A truly free capture: no opponent piece can immediately take the
-        # capturing piece. These are always preferred when we are winning.
-        free_capture = not immediate_replies
+        # capturing piece. Also require the resulting position to remain safe:
+        # no immediate mate-in-one and no free major/minor piece hanging next.
+        free_capture = (
+            not immediate_replies
+            and free_capture_position_safe(board, move)
+        )
 
         candidate = candidate_map.get(move)
         candidate_cp = (
@@ -8783,6 +8858,9 @@ def find_safe_free_capture(
         )
 
         if immediate_take:
+            continue
+
+        if not free_capture_position_safe(board, move):
             continue
 
         candidate_cp = int(candidate.get("cp", best_cp))
