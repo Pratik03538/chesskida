@@ -152,6 +152,9 @@ BOT_EVERY_MOVE_DELAY_MIN = 0.000
 BOT_EVERY_MOVE_DELAY_MAX = 0.010
 BOT_THINKING_ENABLED_DEFAULT = True
 BOT_THINKING_START_AFTER_MOVE = 10
+BOT_PAUSE_MOVE_COOLDOWN_MIN = 8
+BOT_PAUSE_MOVE_COOLDOWN_MAX = 12
+BOT_PAUSE_ELIGIBILITY_SCALE = 0.55
 BOT_THINK_PAUSE_MIN = 2.0
 BOT_THINK_PAUSE_MAX = 5.0
 BOT_THINK_BUDGET_MIN = 10.0
@@ -245,7 +248,7 @@ def match_ui_mouse_callback(event, x, y, flags, param):
             BOT_THINKING_ENABLED_DEFAULT
         )
         print(
-            "[THINKING UI] THINKING = "
+            "[PAUSE UI] PAUSE = "
             f"{'ON' if param['thinking_enabled'] else 'OFF'}"
         )
         return
@@ -1381,8 +1384,8 @@ def match_ui_draw(
     cv2.putText(
         display_frame,
         (
-            f"THINKING: {'ON' if thinking_enabled else 'OFF'}  |  "
-            f"PAUSE: {BOT_THINK_PAUSE_MIN:.1f}-{BOT_THINK_PAUSE_MAX:.1f}s"
+            f"PAUSE: {'ON' if thinking_enabled else 'OFF'}  |  "
+            f"PAUSE RANGE: {BOT_THINK_PAUSE_MIN:.1f}-{BOT_THINK_PAUSE_MAX:.1f}s"
         ),
         (panel_x + 14, panel_y + 124),
         cv2.FONT_HERSHEY_SIMPLEX,
@@ -1393,7 +1396,7 @@ def match_ui_draw(
 
     cv2.putText(
         display_frame,
-        f"TOTAL THINKING BUDGET: {budget_text}  |  RANDOM COOLDOWN",
+        f"TOTAL PAUSE BUDGET: {budget_text}  |  RANDOM MOVE GAP",
         (panel_x + 14, panel_y + 144),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.30,
@@ -1415,9 +1418,9 @@ def match_ui_draw(
 
     # Thinking toggle sits above the existing match-action controls.
     think_label = (
-        "THINKING: ON"
+        "PAUSE: ON"
         if thinking_enabled
-        else "THINKING: OFF"
+        else "PAUSE: OFF"
     )
 
     think_bx1 = panel_x + 14
@@ -2561,7 +2564,7 @@ _last_bot_natural_delay = None
 _bot_timing_move_count = 0
 _thinking_budget_remaining = None
 _thinking_budget_total = None
-_thinking_cooldown_until = 0.0
+_thinking_move_cooldown_remaining = 0
 _mate_pause_used = False
 
 
@@ -8149,16 +8152,7 @@ def classify_move_quality(
     if loss <= 70:
         return "GOOD"
 
-    if loss <= 150:
-        return "INACCURACY"
-
-    if loss <= 300:
-        return "MISTAKE"
-
-    return "BLUNDER"
-
-
-def natural_bot_move_delay(
+    if lossdef natural_bot_move_delay(
     board,
     move,
     engine_result=None,
@@ -8167,22 +8161,22 @@ def natural_bot_move_delay(
     thinking_enabled=BOT_THINKING_ENABLED_DEFAULT,
     previous_eval_white_cp=None
 ):
-    """Return the retained base delay plus an event/budget-based thinking pause.
+    """Return the retained base delay plus a natural event-based pause.
 
-    No fixed move numbers are used. Each move receives a randomized
-    eligibility check, but a pause is considered only when the position
-    provides useful thinking signals. A randomized cooldown prevents
-    consecutive pauses, and a 10-15 second per-game budget caps total
-    thinking time.
+    The first 10 bot moves are always pause-free. After a real pause, a
+    random 8-12 BOT-MOVE refractory period is enforced. Once that period
+    expires, position complexity plus a randomized eligibility check decides
+    whether another pause happens. This prevents clustered pauses and avoids
+    a predictable "every N moves" rhythm.
+
+    Total pause time is capped by a random 10-15 second per-game budget.
     """
     global _last_bot_natural_delay
     global _bot_timing_move_count
     global _thinking_budget_remaining
     global _thinking_budget_total
-    global _thinking_cooldown_until
+    global _thinking_move_cooldown_remaining
 
-    # Keep the existing move counter because other verification logic uses it.
-    # It is deliberately NOT used to schedule thinking pauses.
     if len(board.move_stack) <= 1:
         _bot_timing_move_count = 0
         _thinking_budget_total = random.uniform(
@@ -8190,7 +8184,7 @@ def natural_bot_move_delay(
             BOT_THINK_BUDGET_MAX
         )
         _thinking_budget_remaining = _thinking_budget_total
-        _thinking_cooldown_until = 0.0
+        _thinking_move_cooldown_remaining = 0
 
     _bot_timing_move_count += 1
 
@@ -8202,8 +8196,7 @@ def natural_bot_move_delay(
     delay = base_delay
     _last_bot_natural_delay = base_delay
 
-    # Absolutely no 2-5 second thinking pause in the first 10 bot moves.
-    # The base 0-10ms interaction delay remains unchanged.
+    # First 10 bot moves: absolutely no long pause.
     if _bot_timing_move_count <= BOT_THINKING_START_AFTER_MOVE:
         return max(0.0, float(delay))
 
@@ -8216,12 +8209,11 @@ def natural_bot_move_delay(
     ):
         return max(0.0, float(delay))
 
-    now = time.perf_counter()
-
-    if now < _thinking_cooldown_until:
+    # Minimum move gap after every real pause.
+    if _thinking_move_cooldown_remaining > 0:
+        _thinking_move_cooldown_remaining -= 1
         return max(0.0, float(delay))
 
-    # Position-thinking signals.
     signal_score = 0.0
 
     # Multiple reasonable moves / evaluation uncertainty from MultiPV.
@@ -8259,7 +8251,7 @@ def natural_bot_move_delay(
         if second_gap <= BOT_THINK_UNCERTAINTY_CP:
             signal_score += 0.24
 
-    # Position immediately after a tactical/forcing move.
+    # Position immediately after a tactical/forcing change.
     if board.move_stack:
         try:
             previous_board = board.copy(stack=True)
@@ -8307,8 +8299,7 @@ def natural_bot_move_delay(
     if legal_count >= BOT_THINK_STRATEGIC_LEGAL_MOVES:
         signal_score += 0.14
 
-    # Strongly forcing current moves should not consume thinking budget just
-    # because the surrounding position happens to score as complex.
+    # Strongly forcing current moves are poor pause candidates.
     try:
         forced_move = (
             board.is_check()
@@ -8326,20 +8317,23 @@ def natural_bot_move_delay(
     if signal_score <= 0.0:
         return max(0.0, float(delay))
 
-    # Randomized eligibility happens on every move.
+    # Position-dependent random eligibility. This is intentionally stochastic
+    # even after the cooldown expires, so pauses do not occur every 8-12 moves.
     eligibility = min(
         BOT_THINK_ELIGIBILITY_MAX,
         max(
             BOT_THINK_ELIGIBILITY_MIN,
-            BOT_THINK_ELIGIBILITY_MIN + signal_score
+            (
+                BOT_THINK_ELIGIBILITY_MIN
+                + signal_score * BOT_PAUSE_ELIGIBILITY_SCALE
+            )
         )
     )
 
     if random.random() >= eligibility:
         return max(0.0, float(delay))
 
-    # Important budget rule:
-    # remaining_budget <= minimum_pause -> no more pauses.
+    # Budget safety.
     if _thinking_budget_remaining <= BOT_THINK_PAUSE_MIN:
         return max(0.0, float(delay))
 
@@ -8351,32 +8345,35 @@ def natural_bot_move_delay(
     if pause_max < BOT_THINK_PAUSE_MIN:
         return max(0.0, float(delay))
 
-    think_pause = random.uniform(
+    pause_duration = random.uniform(
         BOT_THINK_PAUSE_MIN,
         pause_max
     )
 
     _thinking_budget_remaining = max(
         0.0,
-        float(_thinking_budget_remaining) - think_pause
+        float(_thinking_budget_remaining) - pause_duration
     )
 
-    _thinking_cooldown_until = (
-        now
-        + random.uniform(
-            BOT_THINK_COOLDOWN_MIN,
-            BOT_THINK_COOLDOWN_MAX
-        )
+    # After a pause, 8-12 bot moves are guaranteed pause-free.
+    _thinking_move_cooldown_remaining = random.randint(
+        BOT_PAUSE_MOVE_COOLDOWN_MIN,
+        BOT_PAUSE_MOVE_COOLDOWN_MAX
     )
 
-    delay += think_pause
+    delay += pause_duration
 
     print(
-        "[BOT THINK PAUSE] "
-        f"duration={think_pause:.3f}s "
+        "[BOT PAUSE] "
+        f"duration={pause_duration:.3f}s "
         f"remaining_budget={_thinking_budget_remaining:.3f}s "
-        f"eligibility={eligibility:.2f} "
-        f"cooldown={max(0.0, _thinking_cooldown_until - now):.2f}s",
+        f"next_pause_block={_thinking_move_cooldown_remaining} moves "
+        f"eligibility={eligibility:.2f}",
+        flush=True
+    )
+
+    return max(0.0, float(delay))
+x(0.0, _thinking_cooldown_until - now):.2f}s",
         flush=True
     )
 
