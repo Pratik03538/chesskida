@@ -52,7 +52,7 @@ CLICK_HOLD_MAX = 0.0
 # actually selected. This prevents a bad source click (for example selecting
 # a queen when Stockfish asked for a bishop) from turning into a legal but
 # wrong move such as Qxg5 instead of Bxg5.
-BOT_SOURCE_SELECT_TIMEOUT = 0.020
+BOT_SOURCE_SELECT_TIMEOUT = 0.008
 BOT_SOURCE_SELECT_POLL = 0.001
 BOT_SOURCE_SELECT_CHANGE_MIN = 0.0012
 BOT_SOURCE_SELECT_MAX_EXTRA_CHANGES = 0
@@ -102,7 +102,7 @@ TURN_RESCAN_CONFIRM_DELAY = 0.025
 TURN_RESCAN_MAX_MISMATCH = 0
 TURN_RESCAN_TOP_CANDIDATES = 6
 
-BOT_VERIFY_TIMEOUT = 0.250
+BOT_VERIFY_TIMEOUT = 0.100
 BOT_CONFIRM_SAMPLES = 1
 BOT_CLICK_RETRIES = 1
 BOT_RECOVERY_POLL = 0.0005
@@ -185,8 +185,8 @@ BOT_DELAY_REPEAT_GAP = 0.045
 
 # Small random gap between SOURCE and DESTINATION clicks.
 # This is the physical move gesture interval, not a thinking delay.
-BOT_SOURCE_TO_TARGET_DELAY_MIN = 0.004
-BOT_SOURCE_TO_TARGET_DELAY_MAX = 0.012
+BOT_SOURCE_TO_TARGET_DELAY_MIN = 0.002
+BOT_SOURCE_TO_TARGET_DELAY_MAX = 0.008
 
 # When the normal safe pool contains too few lower-ranked choices, allow a
 # small extra evaluation band ONLY for rank-diversity selection. This does not
@@ -2817,9 +2817,9 @@ def _sendinput_mouse_flag(flag):
         return False
 
 
-def left_click_screen(x, y, hold_seconds=0.020):
+def left_click_screen(x, y, hold_seconds=0.008)
     user32.SetCursorPos(int(x), int(y))
-    time.sleep(0.004)
+    time.sleep(0.002)
 
     if _sendinput_mouse_flag(MOUSEEVENTF_LEFTDOWN):
         time.sleep(max(0.0, float(hold_seconds)))
@@ -4072,7 +4072,7 @@ def click_move(
     if not left_click_screen(
         sx,
         sy,
-        hold_seconds=0.020
+        hold_seconds=0.008
     ):
         print(
             "[BOT CLICK] SOURCE INPUT DISPATCH FAILED | "
