@@ -2817,7 +2817,7 @@ def _sendinput_mouse_flag(flag):
         return False
 
 
-def left_click_screen(x, y, hold_seconds=0.008)
+def left_click_screen(x, y, hold_seconds=0.008):
     user32.SetCursorPos(int(x), int(y))
     time.sleep(0.002)
 
@@ -4116,7 +4116,7 @@ def click_move(
     if not left_click_screen(
         tx,
         ty,
-        hold_seconds=0.020
+        hold_seconds=0.008
     ):
         print(
             "[BOT CLICK] TARGET INPUT DISPATCH FAILED | "
