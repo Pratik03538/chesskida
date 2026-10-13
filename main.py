@@ -4116,7 +4116,7 @@ def click_move(
     if not left_click_screen(
         tx,
         ty,
-        hold_seconds=0.008
+        hold_seconds=0.012
     ):
         print(
             "[BOT CLICK] TARGET INPUT DISPATCH FAILED | "
