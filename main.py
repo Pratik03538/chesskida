@@ -52,7 +52,7 @@ CLICK_HOLD_MAX = 0.0
 # actually selected. This prevents a bad source click (for example selecting
 # a queen when Stockfish asked for a bishop) from turning into a legal but
 # wrong move such as Qxg5 instead of Bxg5.
-BOT_SOURCE_SELECT_TIMEOUT = 0.008
+BOT_SOURCE_SELECT_TIMEOUT = 0.015
 BOT_SOURCE_SELECT_POLL = 0.001
 BOT_SOURCE_SELECT_CHANGE_MIN = 0.0012
 BOT_SOURCE_SELECT_MAX_EXTRA_CHANGES = 0
@@ -102,7 +102,7 @@ TURN_RESCAN_CONFIRM_DELAY = 0.025
 TURN_RESCAN_MAX_MISMATCH = 0
 TURN_RESCAN_TOP_CANDIDATES = 6
 
-BOT_VERIFY_TIMEOUT = 0.050
+BOT_VERIFY_TIMEOUT = 0.150
 BOT_CONFIRM_SAMPLES = 1
 BOT_CLICK_RETRIES = 1
 BOT_RECOVERY_POLL = 0.0005
@@ -185,8 +185,8 @@ BOT_DELAY_REPEAT_GAP = 0.045
 
 # Small random gap between SOURCE and DESTINATION clicks.
 # This is the physical move gesture interval, not a thinking delay.
-BOT_SOURCE_TO_TARGET_DELAY_MIN = 0.002
-BOT_SOURCE_TO_TARGET_DELAY_MAX = 0.008
+BOT_SOURCE_TO_TARGET_DELAY_MIN = 0.004
+BOT_SOURCE_TO_TARGET_DELAY_MAX = 0.010
 
 # When the normal safe pool contains too few lower-ranked choices, allow a
 # small extra evaluation band ONLY for rank-diversity selection. This does not
@@ -2817,7 +2817,7 @@ def _sendinput_mouse_flag(flag):
         return False
 
 
-def left_click_screen(x, y, hold_seconds=0.008):
+def left_click_screen(x, y, hold_seconds=0.012):
     user32.SetCursorPos(int(x), int(y))
     time.sleep(0.002)
 
@@ -4072,7 +4072,7 @@ def click_move(
     if not left_click_screen(
         sx,
         sy,
-        hold_seconds=0.008
+        hold_seconds=0.012
     ):
         print(
             "[BOT CLICK] SOURCE INPUT DISPATCH FAILED | "
@@ -13300,18 +13300,11 @@ def main():
                                     else:
                                         next_human_best_uci = None
 
-                                    settled_frame = get_settled_frame(
-                                        sct,
-                                        scrcpy_hwnd,
-                                        after_frame,
-                                        timeout=0.10
-                                    )
-
-                                    baseline_frame = (
-                                        settled_frame
-                                        if settled_frame is not None
-                                        else after_frame
-                                    )
+                                    # Keep the exact frame that verified the bot move as
+                                    # the next human-move baseline. A quick human reply can appear
+                                    # during an extra settle wait; using that later frame would
+                                    # absorb the reply into the baseline and hide its board delta.
+                                    baseline_frame = after_frame
 
                                     # The move has already passed physical move
                                     # verification. Build the display grid from the
