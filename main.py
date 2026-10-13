@@ -123,6 +123,9 @@ BOT_POST_MATCH_THRESHOLD = 0.40
 # This prevents a single rook/bishop template confusion (for example
 # a8:r -> b) from blocking an otherwise correct physical position.
 FULL_BOARD_EXPECTED_MATCH_THRESHOLD = 0.40
+# Human-move recovery only: ignore weak piece-template hits on squares that
+# the expected legal position says are empty (e.g. false K=0.125 matches).
+HUMAN_EMPTY_SQUARE_NOISE_THRESHOLD = 0.10
 # Empty destination safety check only. This prevents a loose template match
 # (such as the false K=0.125 seen on an empty e4) from blocking a legal move.
 EMPTY_DEST_MATCH_THRESHOLD = 0.10
@@ -4954,7 +4957,8 @@ def fast_human_move_rescan(
                         confirm_frame,
                         expected_board_after_move(board, move),
                         board_coords,
-                        black_perspective
+                        black_perspective,
+                        allow_weak_empty_noise=True
                     )
 
                     if full_ok:
@@ -4993,6 +4997,18 @@ def fast_human_move_rescan(
     return None, None
 
 
+
+
+def is_weak_empty_square_false_positive(
+    expected_symbol,
+    observed_symbol,
+    observed_conf
+):
+    return (
+        expected_symbol is None
+        and observed_symbol is not None
+        and observed_conf >= HUMAN_EMPTY_SQUARE_NOISE_THRESHOLD
+    )
 
 
 def periodic_full_board_catchup_scan(
@@ -5063,7 +5079,7 @@ def periodic_full_board_catchup_scan(
     def raw_mismatch(observed, expected_board):
         count = 0
         for square in chess.SQUARES:
-            observed_symbol, _ = observed.get(
+            observed_symbol, observed_conf = observed.get(
                 square,
                 (None, 999.0)
             )
@@ -5073,6 +5089,12 @@ def periodic_full_board_catchup_scan(
                 if piece is not None
                 else None
             )
+            if is_weak_empty_square_false_positive(
+                expected_symbol,
+                observed_symbol,
+                observed_conf
+            ):
+                observed_symbol = None
             if observed_symbol != expected_symbol:
                 count += 1
         return count
@@ -5099,6 +5121,14 @@ def periodic_full_board_catchup_scan(
             )
 
             if observed_symbol == expected_symbol:
+                exact += 1
+                continue
+
+            if is_weak_empty_square_false_positive(
+                expected_symbol,
+                observed_symbol,
+                observed_conf
+            ):
                 exact += 1
                 continue
 
@@ -5256,7 +5286,8 @@ def periodic_full_board_catchup_scan(
         frame_b,
         best["expected_board"],
         board_coords,
-        black_perspective
+        black_perspective,
+        allow_weak_empty_noise=True
     )
 
     if not full_ok:
@@ -5364,6 +5395,12 @@ def ultra_board_delta_recovery(
         expected_symbol = internal_symbols[square]
         if observed_symbol == expected_symbol:
             continue
+        if is_weak_empty_square_false_positive(
+            expected_symbol,
+            observed_symbol,
+            observed_conf
+        ):
+            continue
         if (
             observed_symbol is None
             or expected_symbol is None
@@ -5401,6 +5438,12 @@ def ultra_board_delta_recovery(
         )
         expected_symbol = internal_symbols[square]
         if observed_symbol == expected_symbol:
+            continue
+        if is_weak_empty_square_false_positive(
+            expected_symbol,
+            observed_symbol,
+            observed_conf
+        ):
             continue
         if (
             observed_symbol is None
@@ -5598,7 +5641,8 @@ def ultra_board_delta_recovery(
         frame_b,
         best_a["expected_after"],
         board_coords,
-        black_perspective
+        black_perspective,
+        allow_weak_empty_noise=True
     )
 
     motion_supported = (
@@ -5882,7 +5926,8 @@ def ultra_human_background_rescan(
         frame,
         expected_board_after_move(board, best_move),
         board_coords,
-        black_perspective
+        black_perspective,
+        allow_weak_empty_noise=True
     )
 
     if not post_ok or not full_ok:
@@ -7335,11 +7380,11 @@ def screen_still_before_move(
 
 
 def full_board_state_confirmed(
-
     frame,
     expected_board,
     board_coords,
-    black_perspective
+    black_perspective,
+    allow_weak_empty_noise=False
 ):
     """Require the physical screen to match the expected chess position.
 
@@ -7383,6 +7428,16 @@ def full_board_state_confirmed(
         )
 
         if observed_symbol == expected_symbol:
+            continue
+
+        if (
+            allow_weak_empty_noise
+            and is_weak_empty_square_false_positive(
+                expected_symbol,
+                observed_symbol,
+                observed_conf
+            )
+        ):
             continue
 
         # For occupied expected squares, re-check ONLY the expected piece
@@ -7476,7 +7531,8 @@ def verify_human_move_on_screen(
                 candidate_frame,
                 expected_board,
                 board_coords,
-                black_perspective
+                black_perspective,
+                allow_weak_empty_noise=True
             )
             if full_ok:
                 return True, candidate_frame, (
