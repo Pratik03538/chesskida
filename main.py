@@ -2376,10 +2376,9 @@ SHOW_TERMINAL_BOARD = False
 # ============================================================
 # STOCKFISH MULTI-PV TRAINING
 # ============================================================
-# The earlier full system used MultiPV=15 after the GM book ends.
-# The existing fast selection/recovery logic remains unchanged; only
-# the candidate count is restored to the original 15-line search.
-TRAINING_MULTI_PV = 15
+# Keep an eight-line candidate pool to reduce post-book search work.
+# Rank-based selection logic remains otherwise unchanged.
+TRAINING_MULTI_PV = 8
 FORCE_BEST_MIN_CP = 200
 FORCE_BEST_IMPROVEMENT_FRACTION = 0.65
 
@@ -2425,6 +2424,7 @@ FREE_CAPTURE_MAX_CP_DROP = 100
 # after taking the piece, do not allow a line that gives up a major/minor
 # piece in the next 1-2 opponent moves or enters a forced mate M1-M5.
 FREE_CAPTURE_SAFETY_DEPTH = 10
+FREE_CAPTURE_SAFETY_TIME = 0.040
 FREE_CAPTURE_SAFETY_MAX_CP_DROP = 250
 FREE_CAPTURE_SAFETY_MAX_PLY = 4
 
@@ -6068,6 +6068,9 @@ def detect_human_move(
         fast_move is not None
         and fast_frame is not None
     ):
+        # This path already confirms the candidate on a fresh frame and
+        # passes the complete expected board through full_board_state_confirmed().
+        detect_human_move._last_detection_source = "FAST_RESCAN_VERIFIED"
         return fast_move, fast_frame
 
     while (
@@ -9062,7 +9065,8 @@ def free_capture_engine_safe(
         info = engine.analyse(
             after,
             chess.engine.Limit(
-                depth=FREE_CAPTURE_SAFETY_DEPTH
+                depth=FREE_CAPTURE_SAFETY_DEPTH,
+                time=FREE_CAPTURE_SAFETY_TIME
             )
         )
 
@@ -11377,6 +11381,7 @@ def main():
     scrcpy_hwnd = None
     cached_board_coords = None
     cached_board_grid = None
+    ui_canvas = None
     baseline_frame = None
     grid_locked = False
     game_ready = False
@@ -11469,10 +11474,8 @@ def main():
                     continue
 
                 # Keep the live capture untouched for detection/click verification.
-                # Add a dedicated right-side presentation area for all UI panels so
-                # evaluation data, buttons and move history never cover the board.
-                display_frame = frame.copy()
-
+                # Reuse the presentation canvas to avoid allocating a new wide
+                # image and copying the full frame twice on every loop iteration.
                 if cached_board_coords:
                     ui_side_width = 600
                     ui_gap = 12
@@ -11481,22 +11484,30 @@ def main():
                         + ui_gap
                         + ui_side_width
                     )
-
-                    ui_canvas = np.zeros(
-                        (
-                            frame.shape[0],
-                            canvas_width,
-                            frame.shape[2]
-                        ),
-                        dtype=frame.dtype
+                    canvas_shape = (
+                        frame.shape[0],
+                        canvas_width,
+                        frame.shape[2]
                     )
 
-                    ui_canvas[
-                        :,
-                        :frame.shape[1]
-                    ] = frame
+                    if (
+                        ui_canvas is None
+                        or ui_canvas.shape != canvas_shape
+                        or ui_canvas.dtype != frame.dtype
+                    ):
+                        ui_canvas = np.zeros(
+                            canvas_shape,
+                            dtype=frame.dtype
+                        )
+                    else:
+                        # The board area is overwritten below; clear only the
+                        # side panel so old overlay text cannot remain visible.
+                        ui_canvas[:, frame.shape[1]:].fill(0)
 
+                    ui_canvas[:, :frame.shape[1]] = frame
                     display_frame = ui_canvas
+                else:
+                    display_frame = frame.copy()
 
                 if key == ord("m"):
                     if match_ui.get("phase") == "RESULT":
@@ -12409,15 +12420,18 @@ def main():
                             )
                             detect_human_move._last_detection_source = None
 
-                            if detection_source in (
+                            if detection_source == "FAST_RESCAN_VERIFIED":
+                                final_human_ok = True
+                                final_human_frame = move_frame
+                                final_human_reason = (
+                                    "fast candidate confirmation + full-board verification passed"
+                                )
+                            elif detection_source in (
                                 "ULTRA_DELTA",
                                 "PERIODIC_FULL_RESCAN"
                             ):
-                                # The ultra delta layer has already cross-validated
-                                # the current board against the internal board in two
-                                # scans and passed full-board physical verification.
-                                # Do not run the old temporal-only verifier again on
-                                # the same already-settled frame.
+                                # These recovery paths already cross-validate
+                                # the expected board and pass full-board verification.
                                 final_human_ok = True
                                 final_human_frame = move_frame
                                 final_human_reason = (
@@ -13243,26 +13257,15 @@ def main():
                                         else after_frame
                                     )
 
-                                    # Opening speed-up: during the first 10 bot
-                                    # moves, the internal board is already physically
-                                    # verified, so do not pay for another complete
-                                    # 64-square template scan just to refresh the overlay.
-                                    # Move verification itself is unchanged.
-                                    if len(board.move_stack) <= 20:
-                                        cached_board_grid = board_to_display_grid(
-                                            board,
-                                            visual_black_perspective
-                                        )
-                                        last_scan_time_ms = 0.0
-                                    else:
-                                        (
-                                            cached_board_grid,
-                                            _,
-                                            last_scan_time_ms
-                                        ) = scan_board(
-                                            baseline_frame,
-                                            cached_board_coords
-                                        )
+                                    # The move has already passed physical move
+                                    # verification. Build the display grid from the
+                                    # committed internal board instead of running an
+                                    # extra 64-square template scan after every bot move.
+                                    cached_board_grid = board_to_display_grid(
+                                        board,
+                                        visual_black_perspective
+                                    )
+                                    last_scan_time_ms = 0.0
 
                                     pending_bot_moves.pop(
                                         position_key,
